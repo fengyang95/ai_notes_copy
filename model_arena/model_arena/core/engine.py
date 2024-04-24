@@ -6,15 +6,6 @@ from pandas.core.frame import DataFrame
 from .llms import BytedChatGPT
 
 try:
-    import torch
-except ImportError as e:
-    print(
-        "ModelArena core engine depends on PyTorch package."
-        "To use it, you have to install pytorch by:\npip install torch\n"
-    )
-    raise e
-
-try:
     from langchain_core.language_models.llms import BaseLLM
     from langchain_community.llms import VLLM
     from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
@@ -71,6 +62,15 @@ class HuggingFaceEngine(LLMEngine):
     engine_method: str = "huggingface"
 
     def _init_engine(self) -> None:
+        try:
+            import torch
+        except ImportError as e:
+            print(
+                "ModelArena core HuggingFaceEngine depends on PyTorch package."
+                "To use it, you have to install pytorch by:\npip install torch\n"
+            )
+            raise e
+
         self.llm = HuggingFacePipeline.from_model_id(
             model_id=self.model_path,
             task="text-generation",

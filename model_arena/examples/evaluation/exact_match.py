@@ -14,7 +14,17 @@ ignore = lambda x: x == "<N/A>"
 # transfrom output, we hope that the language output is the last word possible
 transform = lambda x: re.search(r"[\w]*", x.strip().split(" ")[-1])[0].lower()
 # set up evaluator
-evaluator = ExactMatchEvaluator(ignore=ignore, transform=transform, show_progress=False)
+evaluator = ExactMatchEvaluator(
+    ignore=ignore,
+    transform=transform,
+    show_progress=False,
+)
 # evaluate
-df = ma.evaluate(dataset=dataset, model=model, evaluator=evaluator, upload=False)
-print(df)
+success_df, failed_df = ma.evaluate(
+    dataset=dataset,
+    model=model,
+    evaluator=evaluator,
+    upload=False,
+)
+print(success_df)
+print(failed_df)

@@ -210,16 +210,22 @@ class ModelArena(Base):
 
         stmt = (
             select(
-                self.inferences_table.c[self.dataset_name, self.dataset_id, self.model_id, "output"],
+                self.datasets_table.c[self.dataset_name, self.dataset_id, "tag", "instruction"],
                 self.datasets_table.c["output"].label("label"),
+                self.raw_datasets_table.c["information"],
+                self.inferences_table.c[self.model_id, "output"],
             )
             .join(
-                self.datasets_table,
-                self.inferences_table.c[self.dataset_id] == self.datasets_table.c[self.dataset_id],
+                self.raw_datasets_table,
+                self.datasets_table.c[self.raw_dataset_id] == self.raw_datasets_table.c[self.dataset_id],
+            )
+            .join(
+                self.inferences_table,
+                self.datasets_table.c[self.dataset_id] == self.inferences_table.c[self.dataset_id],
             )
             .where(
                 and_(
-                    self.inferences_table.c[self.dataset_name] == dataset,
+                    self.datasets_table.c[self.dataset_name] == dataset,
                     self.inferences_table.c[self.model_id] == model_id,
                 )
             )
@@ -286,12 +292,12 @@ class ModelArena(Base):
         # generate evaluation dataframe
         df = self._generate_evaluations(dataset, model)
         # use evaluator to evaluate the result
-        df = evaluator.evaluate(df)
+        success_df, failed_df = evaluator.evaluate(df)
         if upload:
             # add evaluation dataframe
-            self.add_evaluations(df)
+            self.add_evaluations(success_df)
 
-        return df
+        return success_df, failed_df
 
     def _match_pairing_technique(self, df: DataFrame, technique: str, target_model_id: str | None = None) -> DataFrame:
         # XXX: fancy match pairing technique coming!
@@ -422,12 +428,12 @@ class ModelArena(Base):
         # generate match dataframe
         df = self._generate_matches(dataset, model, target_model, shuffle=True)
         # use evaluator to judge the preference
-        df = evaluator.evaluate(df)
+        success_df, failed_df = evaluator.evaluate(df)
         if upload:
             # add match dataframe
-            self.add_matches(df)
+            self.add_matches(success_df)
 
-        return df
+        return success_df, failed_df
 
     def get_matches(
         self,
@@ -504,9 +510,9 @@ class ModelArena(Base):
         df_y = df_y.rename(
             columns={
                 self.model_name_x: self.model_name_y,
-                self.model_id_x: self.model_id_y,
+                "score_x": "score_y",
                 self.model_name_y: self.model_name_x,
-                self.model_id_y: self.model_id_x,
+                "score_y": "score_x",
             }
         )
         df = pd.concat((df_x, df_y))
