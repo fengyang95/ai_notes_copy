@@ -15,11 +15,6 @@ ignore = lambda x: x == "<N/A>"
 transform = lambda x: re.search(r"[\w]*", x.strip().split(" ")[-1])[0].lower()
 # set up evaluator
 evaluator = ExactMatchEvaluator(ignore=ignore, transform=transform, show_progress=False)
-
-# do it manually
-df = ma.generate_evaluations(dataset=dataset, model=model)
-df = evaluator.evaluate(df)
-ma.add_evaluations(df)
-
-# do it automatically
-ma.evaluate(dataset=dataset, model=model, evaluator=evaluator)
+# evaluate
+df = ma.evaluate(dataset=dataset, model=model, evaluator=evaluator, upload=False)
+print(df)
