@@ -42,6 +42,15 @@ class Models(BaseModule):
         records.update({self.meta_id: uuid.uuid4().hex})
         self.update_meta(model, records)
 
+    def drop(self, model: str) -> None:
+        if not all(self._check([model], self.meta[self.meta_name])):
+            raise ValueError(
+                f"Model {model} not found, please check model name.",
+            )
+
+        # drop meta
+            self.drop_meta(model)
+
     def get_model_id(self, model: str) -> str:
         return self.meta[self.meta[self.meta_name] == model][self.meta_id].values[0]
 

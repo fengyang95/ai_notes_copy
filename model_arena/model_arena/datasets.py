@@ -2,11 +2,11 @@ import uuid
 import json
 import pandas as pd
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from .base import BaseModule
 
-from typing import Union, List, Dict, Any, Optional
+from typing import Union, List, Dict, Any
 from pandas.core.frame import DataFrame
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql.schema import Table
@@ -45,6 +45,10 @@ class RawDatasets(BaseModule):
             raise ValueError(
                 f"Columns {required_columns} is required in dataframe.",
             )
+        # optional columns
+        optional_columns = ["output"]
+        if all(self._check(optional_columns, df.columns)):
+            required_columns += optional_columns
         df = df[required_columns]
 
         # update data
@@ -52,7 +56,7 @@ class RawDatasets(BaseModule):
         df.loc[:, self.meta_id] = [uuid.uuid4().hex for _ in range(df.shape[0])]
 
         # final columns
-        final_columns = [self.meta_name, self.meta_id, "tag", "information"]
+        final_columns = [self.meta_name, self.meta_id] + required_columns
         df = df[final_columns]
 
         # insert data
@@ -61,6 +65,18 @@ class RawDatasets(BaseModule):
         # update meta
         records = {"length": df.shape[0]}
         self.update_meta(dataset, records)
+
+    def drop(self, dataset: str) -> None:
+        if not all(self._check([dataset], self.meta[self.meta_name])):
+            raise ValueError(
+                f"Name {dataset} not found, please check raw dataset name.",
+            )
+
+        # drop meta
+        self.drop_meta(dataset)
+        # drop data
+        drop_data_stmt = delete(self.raw_datasets_table).where(self.raw_datasets_table.c[self.meta_name] == dataset)
+        self._execute(drop_data_stmt)
 
 
 class Datasets(BaseModule):
@@ -104,7 +120,7 @@ class Datasets(BaseModule):
         raw_df["instruction"] = raw_df["information"].apply(lambda x: template.format(**json.loads(x)))
 
         # final columns
-        final_columns = [self.meta_name, self.meta_id, "tag", "instruction"]
+        final_columns = [self.meta_name, self.meta_id, "tag", "instruction", "output"]
         raw_df = raw_df[final_columns]
 
         # insert data
@@ -114,3 +130,15 @@ class Datasets(BaseModule):
         records["length"] = raw_df.shape[0]
         # update meta
         self.update_meta(dataset, records)
+
+    def drop(self, dataset: str) -> None:
+        if not all(self._check([dataset], self.meta[self.meta_name])):
+            raise ValueError(
+                f"Name {dataset} not found, please check dataset name.",
+            )
+
+        # drop meta
+        self.drop_meta(dataset)
+        # drop data
+        drop_data_stmt = delete(self.datasets_table).where(self.datasets_table.c[self.meta_name] == dataset)
+        self._execute(drop_data_stmt)
