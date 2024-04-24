@@ -1,0 +1,26 @@
+[build-system]
+requires = ["flit_core>=3.2"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "model_arena"
+description = "Arena for LLM models."
+authors = [
+  {name="Zhengkai Yang", email="yangzhengkai.0226@bytedance.com"},
+]
+readme = "README.md"
+license = {file = "LICENSE.txt"}
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Operating System :: OS Independent"
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.23.2",
+    "scipy>=1.9.0",
+    "pandas>=1.4.3",
+    "sqlalchemy>=2.0.1",
+]
