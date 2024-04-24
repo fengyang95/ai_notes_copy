@@ -1,3 +1,6 @@
+from . import core
+from . import extensions
+from . import modules
 from .arena import *
 
 # define version

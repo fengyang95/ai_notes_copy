@@ -1,17 +1,14 @@
-import numpy as np
 import pandas as pd
 
-from scipy.optimize import fsolve
 from sqlalchemy import create_engine, select, and_, or_
 from sqlalchemy.orm import aliased
 
 from .base import Base
-from .datasets import Datasets
-from .models import Models
-from .extensions.evaluation import BaseEvaluator
+from .modules.datasets import Datasets
+from .modules.models import Models
+from .extensions.evaluation import UnaryEvaluator
+from .extensions.analysis import BaseAnalyst
 
-from typing import List, Union, Optional
-from pandas.core.series import Series
 from pandas.core.frame import DataFrame
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql.schema import Table
@@ -35,6 +32,7 @@ class ModelArena(Base):
         self.datasets = Datasets(self.engine)
         self.models = Models(self.engine)
         # load tables
+        self.raw_datasets_table = self.datasets.raw_datasets.raw_datasets_table
         self.datasets_table = self.datasets.datasets_table
         self.models_table = self.models.models_table
         self.inferences_table = self._load_table(table_name="inferences")
@@ -55,7 +53,7 @@ class ModelArena(Base):
         engine = create_engine(uri)
         return engine
 
-    def __init__(self, engine: Optional[Engine] = None) -> None:
+    def __init__(self, engine: Engine | None = None) -> None:
         if engine is None:
             engine = self._create_default_engine()
 
@@ -68,6 +66,10 @@ class ModelArena(Base):
     @property
     def dataset_id(self) -> str:
         return self.datasets.meta_id
+
+    @property
+    def raw_dataset_id(self) -> str:
+        return self.datasets.raw_meta_id
 
     @property
     def model_name(self) -> str:
@@ -116,9 +118,9 @@ class ModelArena(Base):
         for extra_column in extra_columns:
             df[extra_column[0]] = pd.Series(dtype=extra_column[1])
 
-    def _generate_inferences(self, model: str, dataset: str) -> DataFrame:
-        model = self.models.check(model)[0]
+    def _generate_inferences(self, dataset: str, model: str) -> DataFrame:
         dataset = self.datasets.check(dataset)[0]
+        model = self.models.check(model)[0]
 
         stmt = select(
             self.datasets_table.c[self.dataset_name, self.dataset_id, "instruction"],
@@ -143,25 +145,25 @@ class ModelArena(Base):
 
         return df
 
-    def generate_inferences(self, model: str, dataset: str) -> DataFrame:
+    def generate_inferences(self, dataset: str, model: str) -> DataFrame:
         print(
             f"You have directly call `generate_inferences` to acquire a dataframe, "
             f"this will build {self.inferences_extra_columns} columns in the dataframe. "
             f"Please remeber to fill them, before call `add_inferences`."
         )
-        return self._generate_inferences(model, dataset)
+        return self._generate_inferences(dataset, model)
 
     def add_inferences(self, df: DataFrame) -> None:
-        required_columns = [*self.three_meta_tuple, *self.inferences_extra_columns]
+        required_columns = [*self.three_meta_tuple, *[c[0] for c in self.inferences_extra_columns]]
         if not self._check(required_columns, df.columns).all():
             raise ValueError(f"Columns {required_columns} is required in dataframe.")
 
         df = df[required_columns]
         self._dump(df, table=self.inferences_table)
 
-    def get_inferences(self, model: str, dataset: str) -> DataFrame:
-        model = self.models.check(model)[0]
-        dataset = self.datasets.check(dataset)[0]
+    def get_inferences(self, datasets: str | list[str], models: str | list[str]) -> DataFrame:
+        datasets = self.datasets.check(datasets)
+        models = self.models.check(models)
 
         stmt = (
             select(
@@ -179,8 +181,8 @@ class ModelArena(Base):
             )
             .where(
                 and_(
-                    self.datasets_table.c[self.dataset_name] == dataset,
-                    self.models_table.c[self.model_name] == model,
+                    self.datasets_table.c[self.dataset_name].in_(datasets),
+                    self.models_table.c[self.model_name].in_(models),
                 )
             )
         )
@@ -188,14 +190,14 @@ class ModelArena(Base):
 
         return df
 
-    def infer(self, model: str, dataset: str, engine: None) -> None:
+    def infer(self, dataset: str, model: str, engine: None) -> None:
         # TODO: use inference engine to automatically generate inference results
         raise NotImplementedError
 
-    def _generate_evaluations(self, model: str, dataset: str) -> DataFrame:
+    def _generate_evaluations(self, dataset: str, model: str) -> DataFrame:
+        dataset = self.datasets.check(dataset)[0]
         model = self.models.check(model)[0]
         model_id = self.models.get_model_id(model)
-        dataset = self.datasets.check(dataset)[0]
 
         stmt = (
             select(
@@ -220,31 +222,36 @@ class ModelArena(Base):
 
         return df
 
-    def generate_evaluations(self, model: str, dataset: str) -> DataFrame:
+    def generate_evaluations(self, dataset: str, model: str) -> DataFrame:
         print(
             f"You have directly call `generate_evaluations` to acquire a dataframe, "
             f"this will build {self.evaluations_extra_columns} columns in the dataframe. "
             f"Please remeber to fill them, before call `add_evaluations`."
         )
-        return self._generate_evaluations(model, dataset)
+        return self._generate_evaluations(dataset, model)
 
     def add_evaluations(self, df: DataFrame) -> None:
-        required_columns = [*self.three_meta_tuple, *self.evaluations_extra_columns]
+        required_columns = [*self.three_meta_tuple, *[c[0] for c in self.evaluations_extra_columns]]
         if not self._check(required_columns, df.columns).all():
             raise ValueError(f"Columns {required_columns} is required in dataframe.")
 
         df = df[required_columns]
         self._dump(df, table=self.evaluations_table)
 
-    def get_evaluations(self, model: str, dataset: str) -> DataFrame:
-        model = self.models.check(model)[0]
-        dataset = self.datasets.check(dataset)[0]
+    def get_evaluations(self, datasets: str, models: str) -> DataFrame:
+        datasets = self.datasets.check(datasets)
+        models = self.models.check(models)
 
         stmt = (
             select(
                 self.datasets_table.c[self.dataset_name, self.dataset_id, "tag", "instruction"],
+                self.raw_datasets_table.c["information"],
                 self.models_table.c[self.model_name],
                 self.evaluations_table.c["auditor", "score"],
+            )
+            .join(
+                self.raw_datasets_table,
+                self.datasets_table.c[self.raw_dataset_id] == self.raw_datasets_table.c[self.dataset_id],
             )
             .join(
                 self.evaluations_table,
@@ -256,8 +263,8 @@ class ModelArena(Base):
             )
             .where(
                 and_(
-                    self.evaluations_table.c[self.dataset_name] == dataset,
-                    self.models_table.c[self.model_name] == model,
+                    self.evaluations_table.c[self.dataset_name].in_(datasets),
+                    self.models_table.c[self.model_name].in_(models),
                 )
             )
         )
@@ -265,56 +272,167 @@ class ModelArena(Base):
 
         return df
 
-    def evaluate(self, model: str, dataset: str, evaluator: BaseEvaluator) -> None:
+    def evaluate(self, dataset: str, model: str, evaluator: UnaryEvaluator) -> None:
         assert evaluator.evaluation_method == "unary", "You have to use an unary evaluator."
         # generate evaluation table
-        df = self._generate_evaluations(model, dataset)
+        df = self._generate_evaluations(dataset, model)
         # use evaluator to evaluate the result
         df = evaluator.evaluate(df)
         # add evaluation table
         self.add_evaluations(df)
 
-    def get_matches(self, model: str, dataset: str, target_model: str | None = None) -> DataFrame:
+    def _generate_matches(
+        self,
+        dataset: str,
+        model: str,
+        target_model: str | None = None,
+        shuffle: bool = True,
+    ) -> DataFrame:
+        dataset = self.datasets.check(dataset)[0]
         model = self.models.check(model)[0]
         model_id = self.models.get_model_id(model)
-        dataset = self.datasets.check(dataset)[0]
 
         if target_model is not None:
             target_model = self.models.check(target_model)[0]
             target_model_id = self.models.get_model_id(target_model)
 
-        # compose match condition
+        inferences_table_x, inferences_table_y = aliased(self.inferences_table), aliased(self.inferences_table)
+
+        # TODO: fancy match pairing techniques should be written here
+        # Currently, it is just a dummy strategy
         if target_model is None:
             match_condition = and_(
-                self.matches_table.c[self.dataset_name] == dataset,
-                or_(
-                    self.matches_table.c[self.model_id_x] == model_id,
-                    self.matches_table.c[self.model_id_y] == model_id,
-                ),
+                self.datasets_table.c[self.dataset_name] == dataset,
+                inferences_table_x.c[self.model_id] == model_id,
+                inferences_table_y.c[self.model_id] != model_id,
             )
         else:
             match_condition = and_(
-                self.matches_table.c[self.dataset_name] == dataset,
-                or_(
-                    and_(
-                        self.matches_table.c[self.model_id_x] == model_id,
-                        self.matches_table.c[self.model_id_y] == target_model_id,
-                    ),
-                    and_(
-                        self.matches_table.c[self.model_id_x] == target_model_id,
-                        self.matches_table.c[self.model_id_y] == model_id,
-                    ),
-                ),
+                self.datasets_table.c[self.dataset_name] == dataset,
+                inferences_table_x.c[self.model_id] == model_id,
+                inferences_table_y.c[self.model_id] == target_model_id,
             )
-
-        models_table_x, models_table_y = aliased(self.models_table), aliased(self.models_table)
 
         stmt = (
             select(
                 self.datasets_table.c[self.dataset_name, self.dataset_id, "tag", "instruction"],
+                inferences_table_x.c[self.model_id].label(self.model_id_x),
+                inferences_table_x.c["output"].label("output_x"),
+                inferences_table_y.c[self.model_id].label(self.model_id_y),
+                inferences_table_y.c["output"].label("output_y"),
+            )
+            .join(
+                inferences_table_x,
+                self.datasets_table.c[self.dataset_id] == inferences_table_x.c[self.dataset_id],
+            )
+            .outerjoin(
+                inferences_table_y,
+                inferences_table_x.c[self.dataset_id] == inferences_table_y.c[self.dataset_id],
+            )
+            .where(
+                match_condition,
+            )
+        )
+        df = pd.read_sql(stmt, con=self.engine)
+
+        if shuffle:
+            # shuffle matches
+            middle_point = df.shape[0] // 2
+            df_u, df_l = df.iloc[:middle_point, :], df.iloc[middle_point:, :]
+            # switch model_x and model_y
+            df_l = df_l.rename(
+                columns={
+                    self.model_id_x: self.model_id_y,
+                    "output_x": "output_y",
+                    self.model_id_y: self.model_id_x,
+                    "output_y": "output_x",
+                }
+            )
+            # concat two parts
+            df = pd.concat((df_u, df_l))
+            # shuffle rows
+            df = df.sample(frac=1, replace=False, ignore_index=True)
+
+        # build evaluations extra columns
+        self._build_extra_columns(df, self.matches_extra_columns)
+
+        return df
+
+    def generate_matches(
+        self,
+        dataset: str,
+        model: str,
+        target_model: str | None = None,
+        shuffle: bool = True,
+    ) -> DataFrame:
+        print(
+            f"You have directly call `generate_matches` to acquire a dataframe, "
+            f"this will build {self.matches_extra_columns} columns in the dataframe. "
+            f"Please remeber to fill them, before call `add_matches`."
+        )
+        return self._generate_matches(dataset, model, target_model=target_model, shuffle=shuffle)
+
+    def add_matches(self, df: DataFrame) -> None:
+        required_columns = [*self.four_meta_tuple, *[c[0] for c in self.matches_extra_columns]]
+        if not self._check(required_columns, df.columns).all():
+            raise ValueError(f"Columns {required_columns} is required in dataframe.")
+
+        df = df[required_columns]
+        self._dump(df, table=self.matches_table)
+
+    def match(self, dataset: str, model: str, target_model: str, judge: None) -> None:
+        # TODO: use a judge to automatically judge between two models
+        raise NotImplementedError
+
+    def get_matches(
+        self,
+        datasets: str | list[str],
+        models: str | list[str],
+        target_models: str | None = None,
+    ) -> DataFrame:
+        datasets = self.datasets.check(datasets)
+        models = self.models.check(models)
+
+        if target_models is not None:
+            target_models = self.models.check(target_models)
+
+        models_table_x, models_table_y = aliased(self.models_table), aliased(self.models_table)
+
+        # compose match condition
+        if target_models is None:
+            match_condition = and_(
+                self.matches_table.c[self.dataset_name].in_(datasets),
+                or_(
+                    models_table_x.c[self.model_name].in_(models),
+                    models_table_y.c[self.model_name].in_(models),
+                ),
+            )
+        else:
+            match_condition = and_(
+                self.matches_table.c[self.dataset_name].in_(datasets),
+                or_(
+                    and_(
+                        models_table_x.c[self.model_name].in_(models),
+                        models_table_y.c[self.model_name].in_(target_models),
+                    ),
+                    and_(
+                        models_table_x.c[self.model_name].in_(target_models),
+                        models_table_y.c[self.model_name].in_(models),
+                    ),
+                ),
+            )
+
+        stmt = (
+            select(
+                self.datasets_table.c[self.dataset_name, self.dataset_id, "tag", "instruction"],
+                self.raw_datasets_table.c["information"],
                 models_table_x.c[self.model_name].label(self.model_name_x),
                 models_table_y.c[self.model_name].label(self.model_name_y),
                 self.matches_table.c["score_x", "score_y"],
+            )
+            .join(
+                self.raw_datasets_table,
+                self.datasets_table.c[self.raw_dataset_id] == self.raw_datasets_table.c[self.dataset_id],
             )
             .join(
                 self.matches_table,
@@ -335,8 +453,8 @@ class ModelArena(Base):
         df = pd.read_sql(stmt, con=self.engine)
 
         # reorder dataframe
-        df_x = df[df[self.model_name_x] == model]
-        df_y = df[df[self.model_name_y] == model]
+        df_x = df[df[self.model_name_x].isin(models)]
+        df_y = df[~df[self.model_name_x].isin(models)]
         # switch model_x and model_y
         df_y = df_y.rename(
             columns={
@@ -350,236 +468,22 @@ class ModelArena(Base):
 
         return df
 
-    def add_matches(self, df: DataFrame) -> None:
-        required_columns = [*self.four_meta_tuple, *self.matches_extra_columns]
-        if not self._check(required_columns, df.columns).all():
-            raise ValueError(f"Columns {required_columns} is required in dataframe.")
-
-        df = df[required_columns]
-        self._dump(df, table=self.matches_table)
-
-    def generate_matches(
+    def analysis(
         self,
-        model: str,
-        datasets: Union[str, List[str]],
-        target_model: Optional[str] = None,
-        shuffle: Optional[bool] = True,
+        datasets: str | list[str],
+        models: str | list[str],
+        analyst: BaseAnalyst,
+        target_models: str | list[str] | None = None,
     ) -> DataFrame:
-        model = self.models.check(model)[0]
-        model_id = self.models.get_model_id(model)
-        datasets = self.datasets.check(datasets)
-
-        if target_model is not None:
-            target_model = self.models.check(target_model)[0]
-            target_model_id = self.models.get_model_id(target_model)
-
-        inferences_table_x = aliased(self.inferences_table)
-        inferences_table_y = aliased(self.inferences_table)
-
-        # TODO: fancy match pairing techniques should be written here
-        # Currently, it is just a dummy strategy
-        if target_model is None:
-            match_condition = inferences_table_y.c[self.models.meta_id] != model_id
+        # get result dataframe
+        if analyst.analysis_method == "unary":
+            df = self.get_evaluations(datasets, models)
+        elif analyst.analysis_method == "pairwise":
+            df = self.get_matches(datasets, models, target_models=target_models)
         else:
-            match_condition = inferences_table_y.c[self.models.meta_id] == target_model_id
+            raise ValueError("Unknown analyst method, it should be one of [unary/pairwise].")
 
-        stmt = (
-            select(
-                self.datasets_table.c[self.datasets.meta_name, self.datasets.meta_id, "tag", "instruction"],
-                inferences_table_x.c[self.models.meta_id].label(f"{self.models.meta_id}_x"),
-                inferences_table_x.c["output"].label("model_output_x"),
-                inferences_table_y.c[self.models.meta_id].label(f"{self.models.meta_id}_y"),
-                inferences_table_y.c["output"].label("model_output_y"),
-            )
-            .join(
-                inferences_table_x,
-                self.datasets_table.c[self.datasets.meta_id] == inferences_table_x.c[self.datasets.meta_id],
-            )
-            .outerjoin(
-                inferences_table_y,
-                inferences_table_x.c[self.datasets.meta_id] == inferences_table_y.c[self.datasets.meta_id],
-            )
-            .where(
-                and_(
-                    self.datasets_table.c[self.datasets.meta_name].in_(datasets),
-                    inferences_table_x.c[self.models.meta_id] == model_id,
-                    match_condition,
-                )
-            )
-        )
-        df = pd.read_sql(stmt, con=self.engine)
-
-        if shuffle:
-            # shuffle matches
-            middle_point = df.shape[0] // 2
-            df_u, df_l = df.iloc[:middle_point, :], df.iloc[middle_point:, :]
-            # switch model_x and model_y
-            df_l = df_l.rename(
-                columns={
-                    f"{self.models.meta_id}_x": f"{self.models.meta_id}_y",
-                    "model_output_x": "model_output_y",
-                    f"{self.models.meta_id}_y": f"{self.models.meta_id}_x",
-                    "model_output_y": "model_output_x",
-                }
-            )
-            # concat two parts
-            df = pd.concat((df_u, df_l))
-            # shuffle rows
-            df = df.sample(frac=1, replace=False, ignore_index=True)
-
-        return df
-
-    def get_score_stat(
-        self,
-        model: str,
-        dataset: str,
-        perfect_score: Optional[int] = 4,
-        pass_score: Optional[int] = 2,
-    ) -> DataFrame:
-        model = self.models.check(model)[0]
-        model_id = self.models.get_model_id(model)
-        dataset = self.datasets.check(dataset)[0]
-
-        stmt_x = (
-            select(
-                self.matches_table.c[self.datasets.meta_id],
-                self.datasets_table.c["tag"],
-                self.matches_table.c["model_score_x"].label("model_score"),
-            )
-            .join(
-                self.datasets_table,
-                self.matches_table.c[self.datasets.meta_id] == self.datasets_table.c[self.datasets.meta_id],
-            )
-            .where(
-                and_(
-                    self.matches_table.c[self.datasets.meta_name] == dataset,
-                    self.matches_table.c[f"{self.models.meta_id}_x"] == model_id,
-                )
-            )
-        )
-        stmt_y = (
-            select(
-                self.matches_table.c[self.datasets.meta_id],
-                self.datasets_table.c["tag"],
-                self.matches_table.c["model_score_y"].label("model_score"),
-            )
-            .join(
-                self.datasets_table,
-                self.matches_table.c[self.datasets.meta_id] == self.datasets_table.c[self.datasets.meta_id],
-            )
-            .where(
-                and_(
-                    self.matches_table.c[self.datasets.meta_name] == dataset,
-                    self.matches_table.c[f"{self.models.meta_id}_y"] == model_id,
-                )
-            )
-        )
-
-        df_x = pd.read_sql(stmt_x, con=self.engine)
-        df_y = pd.read_sql(stmt_y, con=self.engine)
-        df = pd.concat((df_x, df_y))
-
-        # calculate over dataset_id
-        df = df.groupby(by=[self.datasets.meta_id, "tag"]).mean().reset_index()
-
-        # stat over tag
-        def stat(gdf: DataFrame) -> Series:
-            # no zero division
-            if gdf.shape == 0:
-                return pd.Series()
-
-            perfect_rate = (gdf["model_score"] == perfect_score).sum() / gdf.shape[0]
-            pass_rate = (gdf["model_score"] >= pass_score).sum() / gdf.shape[0]
-            me = (gdf["model_score"]).mean()
-
-            perfect_rate = round(perfect_rate * 100, 2)
-            pass_rate = round(pass_rate * 100, 2)
-            me = round(me, 2)
-
-            s = pd.Series([perfect_rate, pass_rate, me], index=["perfect_rate", "pass_rate", "mean"])
-            return s
-
-        df = df.groupby(by=["tag"]).apply(stat).reset_index()
-        return df
-
-    def get_rating(self, datasets: Union[str, List[str]]) -> DataFrame:
-        datasets = self.datasets.check(datasets)
-
-        models_table_x = aliased(self.models_table)
-        models_table_y = aliased(self.models_table)
-
-        stmt = (
-            select(
-                self.matches_table.c[self.datasets.meta_name, "model_score_x", "model_score_y"],
-                models_table_x.c[self.models.meta_name].label(f"{self.models.meta_name}_x"),
-                models_table_y.c[self.models.meta_name].label(f"{self.models.meta_name}_y"),
-            )
-            .join(
-                models_table_x,
-                self.matches_table.c[f"{self.models.meta_id}_x"] == models_table_x.c[self.models.meta_id],
-            )
-            .join(
-                models_table_y,
-                self.matches_table.c[f"{self.models.meta_id}_y"] == models_table_y.c[self.models.meta_id],
-            )
-            .where(
-                self.matches_table.c[self.datasets.meta_name].in_(datasets),
-            )
-        )
-        df = pd.read_sql(stmt, con=self.engine)
-
-        models = (
-            pd.concat(
-                (
-                    df[f"{self.models.meta_name}_x"],
-                    df[f"{self.models.meta_name}_y"],
-                ),
-                ignore_index=True,
-            )
-            .drop_duplicates()
-            .to_list()
-        )
-        models = {model: i for i, model in enumerate(models)}
-
-        n_models = len(models)
-        win_games = np.zeros(n_models, dtype=np.int_)
-        pairwise_games = np.zeros((n_models, n_models), dtype=np.int_)
-
-        for _, row in df.iterrows():
-            model_name_x, model_name_y = row[f"{self.models.meta_name}_x"], row[f"{self.models.meta_name}_y"]
-            model_score_x, model_score_y = row["model_score_x"], row["model_score_y"]
-
-            if model_score_x == model_score_y:
-                continue
-
-            if model_score_x > model_score_y:
-                win_games[models[model_name_x]] += 1
-            else:
-                win_games[models[model_name_y]] += 1
-
-            pairwise_games[models[model_name_x], models[model_name_y]] += 1
-
-        pairwise_games += pairwise_games.T
-
-        def f(x):
-            ret = win_games
-            expx = np.exp(x)
-            expxy = expx[:, np.newaxis] + expx[np.newaxis, :]
-            ret = ret - expx * np.sum(1 / expxy * pairwise_games, axis=1)
-            ret[0] = x[0]
-            return ret
-
-        root = fsolve(f, np.zeros((n_models)), xtol=1e-8)
-
-        scale = 400
-        shift = 1500
-        ratings = [scale * x + shift for x in root]
-        ratings = {model_name: {"rating": rating} for model_name, rating in zip(models.keys(), ratings)}
-
-        df = (
-            pd.DataFrame.from_dict(ratings, orient="index")
-            .sort_values(by="rating", ascending=False)
-            .reset_index(names="model_name")
-        )
+        # anlaysis!
+        df = analyst.analysis(df)
 
         return df

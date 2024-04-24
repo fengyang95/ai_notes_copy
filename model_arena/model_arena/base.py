@@ -3,11 +3,25 @@ import pandas as pd
 import numpy.typing as npt
 
 from abc import ABC, abstractmethod
+from sqlalchemy.dialects.mysql import insert
 from sqlalchemy import select, delete, MetaData, Table
 
 from pandas.core.frame import DataFrame
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, Connection
 from sqlalchemy.sql.expression import Executable
+
+
+def upsert_method(table: Table, conn: Connection, keys: list[str], data_iter: list[npt.NDArray]) -> int:
+    meta = MetaData()
+    sql_table = Table(table.name, meta, autoload_with=conn)
+
+    data = [dict(zip(keys, row)) for row in data_iter]
+    insert_stmt = insert(sql_table).values(data)
+    upsert_stmt = insert_stmt.on_duplicate_key_update({x: insert_stmt.inserted[x] for x in keys})
+
+    result = conn.execute(upsert_stmt.compile())
+
+    return result.rowcount
 
 
 class Base(ABC):
@@ -36,9 +50,12 @@ class Base(ABC):
             conn.execute(stmt)
             conn.commit()
 
-    def _dump(self, df: DataFrame, table: Table) -> None:
+    def _dump(self, df: DataFrame, table: Table, upsert: bool = False) -> None:
         table = str(table.name)
-        df.to_sql(name=table, con=self.engine, if_exists="append", index=False)
+        if upsert:
+            df.to_sql(name=table, con=self.engine, if_exists="append", index=False, method=upsert_method)
+        else:
+            df.to_sql(name=table, con=self.engine, if_exists="append", index=False)
 
 
 class BaseModule(Base):
