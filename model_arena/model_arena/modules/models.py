@@ -4,7 +4,7 @@ import numpy.typing as npt
 
 from sqlalchemy import select
 
-from .base import BaseModule
+from ..base import BaseModule
 
 from pandas.core.frame import DataFrame
 from sqlalchemy.sql.schema import Table
@@ -39,7 +39,13 @@ class Models(BaseModule):
         self._add_meta(model, records)
 
     def update(self, model: str, records: dict[str, object]) -> None:
-        raise NotImplementedError("Currently models does not support update method.")
+        if not self._check([model], self.meta_names).all():
+            raise ValueError(
+                f"Model {model} not found, if you wish to add a new model, use `add` method.",
+            )
+        # update meta
+        records.update({self.meta_id: self.get_model_id(model)})
+        self._add_meta(model, records)
 
     def drop(self, model: str) -> None:
         if not self._check([model], self.meta_names).all():

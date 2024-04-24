@@ -7,7 +7,7 @@ import pandas.api.types as ptypes
 
 from sqlalchemy import select, delete
 
-from .base import BaseModule
+from ..base import BaseModule
 
 from pandas.core.frame import DataFrame
 from sqlalchemy.sql.schema import Table
@@ -67,12 +67,18 @@ class RawDatasets(BaseModule):
         self._dump(df, table=self.raw_datasets_table)
 
     def update(self, dataset: str, df: DataFrame) -> None:
+        if not self._check([dataset], self.meta_names).all():
+            raise ValueError(
+                f"Raw dataset {dataset} not found, if you wish to add a new raw dataset, use `add` method.",
+            )
+        print("Currently I do not believe that there is an elegant way to update dataset.")
+        print("Please drop the dataset and then add a new one.")
         raise NotImplementedError("Currently raw dataset does not support update method.")
 
     def drop(self, dataset: str) -> None:
         if not self._check([dataset], self.meta_names).all():
             raise ValueError(
-                f"Name {dataset} not found, please check raw dataset name.",
+                f"Raw dataset {dataset} not found, please check raw dataset name.",
             )
 
         # drop meta
@@ -85,6 +91,7 @@ class RawDatasets(BaseModule):
 class Datasets(BaseModule):
     meta_name: str = "dataset_name"
     meta_id: str = "dataset_id"
+    raw_meta_id: str = "raw_dataset_id"
     datasets_table: Table
 
     raw_datasets: RawDatasets
@@ -119,7 +126,7 @@ class Datasets(BaseModule):
         raw_df = self.raw_datasets.get(raw_dataset_name)
 
         # transforme raw dataset
-        raw_df = raw_df.rename(columns={self.raw_datasets.meta_id: "raw_dataset_id"})
+        raw_df = raw_df.rename(columns={self.raw_datasets.meta_id: self.raw_meta_id})
         raw_df["instruction"] = raw_df["information"].apply(lambda x: instruction_template.format(**json.loads(x)))
 
         # update raw dataset
@@ -127,7 +134,7 @@ class Datasets(BaseModule):
         raw_df[self.meta_id] = [uuid.uuid4().hex for _ in range(raw_df.shape[0])]
 
         # final columns
-        final_columns = np.array([self.meta_name, self.meta_id, "raw_dataset_id", "tag", "instruction", "output"])
+        final_columns = np.array([self.meta_name, self.meta_id, self.raw_meta_id, "tag", "instruction", "output"])
         df = raw_df[final_columns]
 
         # update records
@@ -137,12 +144,18 @@ class Datasets(BaseModule):
         self._dump(df, table=self.datasets_table)
 
     def update(self, dataset: str, records: dict[str, object]) -> None:
+        if not self._check([dataset], self.meta_names).all():
+            raise ValueError(
+                f"Dataset {dataset} not found, if you wish to add a new dataset, use `add` method.",
+            )
+        print("Currently I do not believe that there is an elegant way to update dataset.")
+        print("Please drop the dataset and then add a new one.")
         raise NotImplementedError("Currently dataset does not support update method.")
 
     def drop(self, dataset: str) -> None:
         if not self._check([dataset], self.meta_names).all():
             raise ValueError(
-                f"Name {dataset} not found, please check dataset name.",
+                f"Dataset {dataset} not found, please check dataset name.",
             )
 
         # drop meta

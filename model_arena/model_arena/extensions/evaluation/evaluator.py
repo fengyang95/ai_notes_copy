@@ -1,5 +1,3 @@
-import numpy as np
-
 from abc import ABC, abstractmethod
 
 from typing import Callable
@@ -37,10 +35,6 @@ class BaseEvaluator(ABC):
         return outputs_transformed
 
     @abstractmethod
-    def _evaluate(self, outputs: Series, labels: Series) -> Series:
-        ...
-
-    @abstractmethod
     def evaluate(self, df: DataFrame) -> DataFrame:
         ...
 
@@ -48,10 +42,14 @@ class BaseEvaluator(ABC):
 class UnaryEvaluator(BaseEvaluator):
     evaluation_method: str = "unary"
 
+    @abstractmethod
+    def _evaluate(self, outputs: Series, labels: Series) -> Series:
+        ...
+
     def evaluate(self, df: DataFrame) -> DataFrame:
         # ignore outputs
         df = self._ignore(df)
-        # transform output
+        # transform outputs
         outputs: Series = self._transform(df[self.output_column])
         labels: Series = df[self.label_column]
         # calculate scores
@@ -59,6 +57,8 @@ class UnaryEvaluator(BaseEvaluator):
         # assign scores
         df.loc[:, "auditor"] = self.evaluator
         df.loc[:, "score"] = scores
+
+        return df
 
 
 class PairwiseEvaluator(BaseEvaluator):
