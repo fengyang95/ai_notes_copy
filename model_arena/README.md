@@ -90,3 +90,7 @@ model_arena.models.add(
     }
 )
 ```
+
+## Advanced Examples
+
+You could find more advanced examples under [examples](https://code.byted.org/smart-infra/ModelArena/tree/main/examples) folder.

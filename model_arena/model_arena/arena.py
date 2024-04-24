@@ -1,11 +1,12 @@
 import pandas as pd
 
-from sqlalchemy import create_engine, select, and_, or_
+from sqlalchemy import create_engine, select, delete, and_, or_
 from sqlalchemy.orm import aliased
 
 from .base import Base
 from .modules.datasets import Datasets
 from .modules.models import Models
+from .core.engine import LLMEngine
 from .extensions.evaluation import UnaryEvaluator, PairwiseEvaluator
 from .extensions.analysis import BaseAnalyst
 
@@ -191,9 +192,16 @@ class ModelArena(Base):
 
         return df
 
-    def infer(self, dataset: str, model: str, engine: None) -> None:
-        # TODO: use inference engine to automatically generate inference results
-        raise NotImplementedError
+    def infer(self, dataset: str, model: str, engine: LLMEngine, upload: bool = True) -> DataFrame:
+        # generate inference dataframe
+        df = self._generate_inferences(dataset, model)
+        # use llm engine to infer the result
+        df = engine.infer(df)
+        if upload:
+            # add inference dataframe
+            self.add_inferences(df)
+
+        return df
 
     def _generate_evaluations(self, dataset: str, model: str) -> DataFrame:
         dataset = self.datasets.check(dataset)[0]
@@ -285,6 +293,21 @@ class ModelArena(Base):
 
         return df
 
+    def _match_pairing_technique(self, df: DataFrame, technique: str, target_model_id: str | None = None) -> DataFrame:
+        # XXX: fancy match pairing technique coming!
+        if technique == "all":
+            df = df
+        elif technique == "target":
+            df = df[df[self.model_id_y] == target_model_id].reset_index(drop=True).copy()
+        elif technique == "random":
+            columns = [self.model_id_y, "output_y"]
+            df = df.groupby(by=df.columns[~df.columns.isin(columns)].to_list()).sample(1).reset_index(drop=True).copy()
+        else:
+            print("Currently we do not support such pairing technique, return the full match dataframe.")
+            df = df
+
+        return df
+
     def _generate_matches(
         self,
         dataset: str,
@@ -296,26 +319,22 @@ class ModelArena(Base):
         model = self.models.check(model)[0]
         model_id = self.models.get_model_id(model)
 
-        if target_model is not None:
+        # setup match pairing technique
+        if target_model is None:
+            technique = "all"
+            target_model_id = None
+        elif target_model == "all":
+            technique = "all"
+            target_model_id = None
+        elif target_model == "random":
+            technique = "random"
+            target_model_id = None
+        else:
+            technique = "target"
             target_model = self.models.check(target_model)[0]
             target_model_id = self.models.get_model_id(target_model)
 
         inferences_table_x, inferences_table_y = aliased(self.inferences_table), aliased(self.inferences_table)
-
-        # TODO: fancy match pairing techniques should be written here
-        # Currently, it is just a dummy strategy
-        if target_model is None:
-            match_condition = and_(
-                self.datasets_table.c[self.dataset_name] == dataset,
-                inferences_table_x.c[self.model_id] == model_id,
-                inferences_table_y.c[self.model_id] != model_id,
-            )
-        else:
-            match_condition = and_(
-                self.datasets_table.c[self.dataset_name] == dataset,
-                inferences_table_x.c[self.model_id] == model_id,
-                inferences_table_y.c[self.model_id] == target_model_id,
-            )
 
         stmt = (
             select(
@@ -334,10 +353,17 @@ class ModelArena(Base):
                 inferences_table_x.c[self.dataset_id] == inferences_table_y.c[self.dataset_id],
             )
             .where(
-                match_condition,
+                and_(
+                    self.datasets_table.c[self.dataset_name] == dataset,
+                    inferences_table_x.c[self.model_id] == model_id,
+                    inferences_table_y.c[self.model_id] != model_id,
+                )
             )
         )
         df = pd.read_sql(stmt, con=self.engine)
+
+        # apply match pairing technique
+        df = self._match_pairing_technique(df, technique=technique, target_model_id=target_model_id)
 
         if shuffle:
             # shuffle matches
@@ -447,7 +473,7 @@ class ModelArena(Base):
                 self.raw_datasets_table.c["information"],
                 models_table_x.c[self.model_name].label(self.model_name_x),
                 models_table_y.c[self.model_name].label(self.model_name_y),
-                self.matches_table.c["score_x", "score_y"],
+                self.matches_table.c["auditor", "score_x", "score_y"],
             )
             .join(
                 self.raw_datasets_table,
@@ -506,3 +532,32 @@ class ModelArena(Base):
         df = analyst.analysis(df)
 
         return df
+
+    def _drop_dataset(self, dataset: str) -> None:
+        self.datasets.drop(dataset)
+
+        tables = [self.inferences_table, self.evaluations_table, self.matches_table]
+        for table in tables:
+            stmt = delete(table).where(table.c[self.dataset_name] == dataset)
+            self._execute(stmt)
+
+    def _drop_model(self, model: str) -> None:
+        self.models.drop(model)
+
+        model_id = self.models.get_model_id(model)
+        tables = [self.inferences_table, self.evaluations_table, self.matches_table]
+        for table in tables:
+            stmt = delete(table).where(table.c[self.model_id] == model_id)
+            self._execute(stmt)
+
+    def drop(self, dataset: str | None = None, model: str | None = None, force: bool = False) -> None:
+        if not force:
+            raise ValueError(
+                "Drop operation is dangerous, we highly recommend not to directly delete data.\n"
+                "If you insist to delete data, you can set `force` to `True`."
+            )
+
+        if dataset is not None:
+            self._drop_dataset(dataset)
+        if model is not None:
+            self._drop_model(model)

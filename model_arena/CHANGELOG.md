@@ -2,6 +2,11 @@
 
 ## v0.0.2 - 2024-MM-DD
 
+### Added
+
+- Add LLMEngine for inference. ([#11](https://code.byted.org/smart-infra/ModelArena/merge_requests/11))
+- Add match pairing technique. ([#12](https://code.byted.org/smart-infra/ModelArena/merge_requests/12))
+
 ### Refactored
 
 - Refact extensions to have higher compatibility. ([#10](https://code.byted.org/smart-infra/ModelArena/merge_requests/10))
