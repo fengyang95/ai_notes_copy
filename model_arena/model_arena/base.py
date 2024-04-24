@@ -5,7 +5,6 @@ import numpy.typing as npt
 from abc import ABC, abstractmethod
 from sqlalchemy import select, delete, MetaData, Table
 
-from typing import Dict, Any
 from pandas.core.frame import DataFrame
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql.expression import Executable
@@ -90,12 +89,12 @@ class BaseModule(Base):
 
         return names
 
-    def _add_meta(self, name: str, records: Dict[str, Any]) -> None:
+    def _add_meta(self, name: str, records: dict[str, object]) -> None:
         # add a meta information into meta_table
         meta = pd.DataFrame.from_dict({name: records}, orient="index").reset_index(names=self.meta_name)
         self._dump(meta, table=self.meta_table)
 
-    def _update_meta(self, name: str, records: Dict[str, Any]) -> None:
+    def _update_meta(self, name: str, records: dict[str, object]) -> None:
         # update a meta information into meta_table
         meta = pd.DataFrame.from_dict({name: records}, orient="index").reset_index(names=self.meta_name)
         self._dump(meta, table=self.meta_table)
