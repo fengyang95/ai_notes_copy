@@ -6,7 +6,6 @@ from sqlalchemy import select
 
 from .base import BaseModule
 
-from typing import Dict, Any
 from pandas.core.frame import DataFrame
 from sqlalchemy.sql.schema import Table
 
@@ -30,7 +29,7 @@ class Models(BaseModule):
 
         return df
 
-    def add(self, model: str, records: Dict[str, Any]) -> None:
+    def add(self, model: str, records: dict[str, object]) -> None:
         if self._check([model], self.meta_names).all():
             raise ValueError(
                 f"Duplicate model {model} found, please use another model name.",
@@ -39,7 +38,7 @@ class Models(BaseModule):
         records.update({self.meta_id: uuid.uuid4().hex})
         self._add_meta(model, records)
 
-    def update(self, model: str, records: Dict[str, Any]) -> None:
+    def update(self, model: str, records: dict[str, object]) -> None:
         raise NotImplementedError("Currently models does not support update method.")
 
     def drop(self, model: str) -> None:

@@ -8,18 +8,27 @@ from sqlalchemy.orm import aliased
 from .base import Base
 from .datasets import Datasets
 from .models import Models
+from .extensions.evaluation import BaseEvaluator
 
 from typing import List, Union, Optional
 from pandas.core.series import Series
 from pandas.core.frame import DataFrame
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql.schema import Table
+from sqlalchemy.sql import ColumnCollection
 
 
 class ModelArena(Base):
     default_db_psm: str = "toutiao.mysql.model_arena_write"
+
     inferences_table: Table
+    inferences_extra_columns: list[tuple[str, type]] = [("prompt", str), ("output", str)]
+
+    evaluations_table: Table
+    evaluations_extra_columns: list[tuple[str, type]] = [("auditor", str), ("score", float)]
+
     matches_table: Table
+    matches_extra_columns: list[tuple[str, type]] = [("auditor", str), ("score_x", float), ("score_y", float)]
 
     def _preload(self) -> None:
         # load modules
@@ -30,6 +39,7 @@ class ModelArena(Base):
         self.models_table = self.models.models_table
         self.inferences_table = self._load_table(table_name="inferences")
         self.matches_table = self._load_table(table_name="matches")
+        self.evaluations_table = self._load_table(table_name="evaluations")
 
     def _create_default_engine(self) -> Engine:
         try:
@@ -51,177 +61,301 @@ class ModelArena(Base):
 
         super().__init__(engine)
 
-    def get_inferences(
-        self,
-        models: Union[str, List[str]],
-        datasets: Union[str, List[str]],
-    ) -> DataFrame:
-        models = self.models.check(models)
-        datasets = self.datasets.check(datasets)
+    @property
+    def dataset_name(self) -> str:
+        return self.datasets.meta_name
 
-        stmt = (
-            select(
-                self.datasets_table.c[self.datasets.meta_name, "tag", "instruction"],
-                self.models_table.c[self.models.meta_name],
-                self.inferences_table.c["prompt", "output"],
-            )
-            .join(
-                self.inferences_table,
-                self.datasets_table.c[self.datasets.meta_id] == self.inferences_table.c[self.datasets.meta_id],
-            )
-            .join(
-                self.models_table,
-                self.inferences_table.c[self.models.meta_id] == self.models_table.c[self.models.meta_id],
-            )
-            .where(
-                and_(
-                    self.datasets_table.c[self.datasets.meta_name].in_(datasets),
-                    self.models_table.c[self.models.meta_name].in_(models),
-                )
-            )
+    @property
+    def dataset_id(self) -> str:
+        return self.datasets.meta_id
+
+    @property
+    def model_name(self) -> str:
+        return self.models.meta_name
+
+    @property
+    def model_name_x(self) -> str:
+        return f"{self.model_name}_x"
+
+    @property
+    def model_name_y(self) -> str:
+        return f"{self.model_name}_y"
+
+    @property
+    def model_id(self) -> str:
+        return self.models.meta_id
+
+    @property
+    def model_id_x(self) -> str:
+        return f"{self.model_id}_x"
+
+    @property
+    def model_id_y(self) -> str:
+        return f"{self.model_id}_y"
+
+    @property
+    def three_meta_tuple(self) -> list[str]:
+        return [self.dataset_name, self.dataset_id, self.model_id]
+
+    @property
+    def four_meta_tuple(self) -> list[str]:
+        return [self.dataset_name, self.dataset_id, f"{self.model_id}_x", f"{self.model_id}_y"]
+
+    def _build_table_columns(self, table: Table, columns: list[str]) -> ColumnCollection:
+        # XXX: this is a way to make code clearer when python version is below 3.11
+        # since we can not use PEP646, this is a workaround of using
+        # unpack in the subscripts
+        # once we have bumped the minimal version of python to 3.11+
+        # this function should be removed accordingly
+        table_columns = ColumnCollection(
+            columns=[table.c[column] for column in columns],
         )
-        df = pd.read_sql(stmt, con=self.engine)
+        return table_columns
 
-        return df
+    def _build_extra_columns(self, df: DataFrame, extra_columns: list[tuple[str, type]]) -> None:
+        for extra_column in extra_columns:
+            df[extra_column[0]] = pd.Series(dtype=extra_column[1])
 
-    def update_inferences(self, df: DataFrame) -> None:
-        # required columns
-        required_columns = [
-            self.datasets.meta_name,
-            self.datasets.meta_id,
-            self.models.meta_id,
-            "prompt",
-            "output",
-        ]
-        if not all(self._check(required_columns, df.columns)):
-            raise ValueError(
-                f"Columns {required_columns} is required in dataframe.",
-            )
-        df = df[required_columns]
-        # insert data
-        self._dump(df, table=self.inferences_table)
-
-    def generate_inferences(
-        self,
-        models: Union[str, List[str]],
-        datasets: Union[str, List[str]],
-    ) -> DataFrame:
-        models = self.models.check(models)
-        datasets = self.datasets.check(datasets)
+    def _generate_inferences(self, model: str, dataset: str) -> DataFrame:
+        model = self.models.check(model)[0]
+        dataset = self.datasets.check(dataset)[0]
 
         stmt = select(
-            self.datasets_table.c[self.datasets.meta_name, self.datasets.meta_id, "instruction"],
-            self.models_table.c[self.models.meta_name, self.models.meta_id, "prompt_template"],
+            self.datasets_table.c[self.dataset_name, self.dataset_id, "instruction"],
+            self.models_table.c[self.model_id, "prompt_template"],
         ).where(
             and_(
-                self.datasets_table.c[self.datasets.meta_name].in_(datasets),
-                self.models_table.c[self.models.meta_name].in_(models),
+                self.datasets_table.c[self.dataset_name] == dataset,
+                self.models_table.c[self.model_name] == model,
             )
         )
         df = pd.read_sql(stmt, con=self.engine)
+
+        # build inferences extra columns
+        self._build_extra_columns(df, self.inferences_extra_columns)
 
         # translate prompt_template into prompt
         df["prompt"] = df.apply(
             lambda x: x["prompt_template"].format(instruction=x["instruction"]),
             axis=1,
         )
-        df = df.drop(columns=["prompt_template"])
+        df = df.drop(columns=["instruction", "prompt_template"])
 
         return df
 
-    def get_matches(
-        self,
-        models: Union[str, List[str]],
-        datasets: Union[str, List[str]],
-        target_model: Optional[str] = None,
-    ) -> DataFrame:
-        models = self.models.check(models)
-        datasets = self.datasets.check(datasets)
+    def generate_inferences(self, model: str, dataset: str) -> DataFrame:
+        print(
+            f"You have directly call `generate_inferences` to acquire a dataframe, "
+            f"this will build {self.inferences_extra_columns} columns in the dataframe. "
+            f"Please remeber to fill them, before call `add_inferences`."
+        )
+        return self._generate_inferences(model, dataset)
 
-        if target_model is not None:
-            target_model = self.models.check(target_model)[0]
+    def add_inferences(self, df: DataFrame) -> None:
+        required_columns = [*self.three_meta_tuple, *self.inferences_extra_columns]
+        if not self._check(required_columns, df.columns).all():
+            raise ValueError(f"Columns {required_columns} is required in dataframe.")
 
-        models_table_x = aliased(self.models_table)
-        models_table_y = aliased(self.models_table)
+        df = df[required_columns]
+        self._dump(df, table=self.inferences_table)
 
-        if target_model is None:
-            match_condition = or_(
-                models_table_x.c[self.models.meta_name].in_(models),
-                models_table_y.c[self.models.meta_name].in_(models),
-            )
-        else:
-            match_condition = or_(
-                and_(
-                    models_table_x.c[self.models.meta_name].in_(models),
-                    models_table_y.c[self.models.meta_name] == target_model,
-                ),
-                and_(
-                    models_table_x.c[self.models.meta_name] == target_model,
-                    models_table_y.c[self.models.meta_name].in_(models),
-                ),
-            )
+    def get_inferences(self, model: str, dataset: str) -> DataFrame:
+        model = self.models.check(model)[0]
+        dataset = self.datasets.check(dataset)[0]
 
         stmt = (
             select(
-                self.datasets_table.c[self.datasets.meta_name, "tag", "instruction"],
-                models_table_x.c[self.models.meta_name].label(f"{self.models.meta_name}_x"),
-                self.matches_table.c["model_score_x"],
-                models_table_y.c[self.models.meta_name].label(f"{self.models.meta_name}_y"),
-                self.matches_table.c["model_score_y"],
+                self.datasets_table.c[self.dataset_name, self.dataset_id, "tag"],
+                self.models_table.c[self.model_name],
+                self.inferences_table.c["prompt", "output"],
             )
             .join(
-                self.matches_table,
-                self.datasets_table.c[self.datasets.meta_id] == self.matches_table.c[self.datasets.meta_id],
+                self.inferences_table,
+                self.datasets_table.c[self.dataset_id] == self.inferences_table.c[self.dataset_id],
             )
             .join(
-                models_table_x,
-                self.matches_table.c[f"{self.models.meta_id}_x"] == models_table_x.c[self.models.meta_id],
-            )
-            .join(
-                models_table_y,
-                self.matches_table.c[f"{self.models.meta_id}_y"] == models_table_y.c[self.models.meta_id],
+                self.models_table,
+                self.inferences_table.c[self.model_id] == self.models_table.c[self.model_id],
             )
             .where(
                 and_(
-                    self.matches_table.c[self.datasets.meta_name].in_(datasets),
-                    match_condition,
+                    self.datasets_table.c[self.dataset_name] == dataset,
+                    self.models_table.c[self.model_name] == model,
                 )
             )
         )
         df = pd.read_sql(stmt, con=self.engine)
 
-        # reorder dataframe
-        df_u = df[df[f"{self.models.meta_name}_x"].isin(models)]
-        df_l = df[df[f"{self.models.meta_name}_y"].isin(models)]
-        # switch model_x and model_y
-        df_l = df_l.rename(
-            columns={
-                f"{self.models.meta_name}_x": f"{self.models.meta_name}_y",
-                "model_score_x": "model_score_y",
-                f"{self.models.meta_name}_y": f"{self.models.meta_name}_x",
-                "model_score_y": "model_score_x",
-            }
+        return df
+
+    def infer(self, model: str, dataset: str, engine: None) -> None:
+        # TODO: use inference engine to automatically generate inference results
+        raise NotImplementedError
+
+    def _generate_evaluations(self, model: str, dataset: str) -> DataFrame:
+        model = self.models.check(model)[0]
+        model_id = self.models.get_model_id(model)
+        dataset = self.datasets.check(dataset)[0]
+
+        stmt = (
+            select(
+                self.inferences_table.c[self.dataset_name, self.dataset_id, self.model_id, "output"],
+                self.datasets_table.c["output"].label("label"),
+            )
+            .join(
+                self.datasets_table,
+                self.inferences_table.c[self.dataset_id] == self.datasets_table.c[self.dataset_id],
+            )
+            .where(
+                and_(
+                    self.inferences_table.c[self.dataset_name] == dataset,
+                    self.inferences_table.c[self.model_id] == model_id,
+                )
+            )
         )
-        df = pd.concat((df_u, df_l))
+        df = pd.read_sql(stmt, con=self.engine)
+
+        # build evaluations extra columns
+        self._build_extra_columns(df, self.evaluations_extra_columns)
 
         return df
 
-    def update_matches(self, df: DataFrame) -> None:
-        # required columns
-        required_columns = [
-            f"{self.datasets.meta_name}",
-            f"{self.datasets.meta_id}",
-            f"{self.models.meta_id}_x",
-            "model_score_x",
-            f"{self.models.meta_id}_y",
-            "model_score_y",
-        ]
-        if not all(self._check(required_columns, df.columns)):
-            raise ValueError(
-                f"Columns {required_columns} is required in dataframe.",
-            )
-        df = df[required_columns]
+    def generate_evaluations(self, model: str, dataset: str) -> DataFrame:
+        print(
+            f"You have directly call `generate_evaluations` to acquire a dataframe, "
+            f"this will build {self.evaluations_extra_columns} columns in the dataframe. "
+            f"Please remeber to fill them, before call `add_evaluations`."
+        )
+        return self._generate_evaluations(model, dataset)
 
+    def add_evaluations(self, df: DataFrame) -> None:
+        required_columns = [*self.three_meta_tuple, *self.evaluations_extra_columns]
+        if not self._check(required_columns, df.columns).all():
+            raise ValueError(f"Columns {required_columns} is required in dataframe.")
+
+        df = df[required_columns]
+        self._dump(df, table=self.evaluations_table)
+
+    def get_evaluations(self, model: str, dataset: str) -> DataFrame:
+        model = self.models.check(model)[0]
+        dataset = self.datasets.check(dataset)[0]
+
+        stmt = (
+            select(
+                self.datasets_table.c[self.dataset_name, self.dataset_id, "tag", "instruction"],
+                self.models_table.c[self.model_name],
+                self.evaluations_table.c["auditor", "score"],
+            )
+            .join(
+                self.evaluations_table,
+                self.datasets_table.c[self.dataset_id] == self.evaluations_table.c[self.dataset_id],
+            )
+            .join(
+                self.models_table,
+                self.evaluations_table.c[self.model_id] == self.models_table.c[self.model_id],
+            )
+            .where(
+                and_(
+                    self.evaluations_table.c[self.dataset_name] == dataset,
+                    self.models_table.c[self.model_name] == model,
+                )
+            )
+        )
+        df = pd.read_sql(stmt, con=self.engine)
+
+        return df
+
+    def evaluate(self, model: str, dataset: str, evaluator: BaseEvaluator) -> None:
+        assert evaluator.evaluation_method == "unary", "You have to use an unary evaluator."
+        # generate evaluation table
+        df = self._generate_evaluations(model, dataset)
+        # use evaluator to evaluate the result
+        df = evaluator.evaluate(df)
+        # add evaluation table
+        self.add_evaluations(df)
+
+    def get_matches(self, model: str, dataset: str, target_model: str | None = None) -> DataFrame:
+        model = self.models.check(model)[0]
+        model_id = self.models.get_model_id(model)
+        dataset = self.datasets.check(dataset)[0]
+
+        if target_model is not None:
+            target_model = self.models.check(target_model)[0]
+            target_model_id = self.models.get_model_id(target_model)
+
+        # compose match condition
+        if target_model is None:
+            match_condition = and_(
+                self.matches_table.c[self.dataset_name] == dataset,
+                or_(
+                    self.matches_table.c[self.model_id_x] == model_id,
+                    self.matches_table.c[self.model_id_y] == model_id,
+                ),
+            )
+        else:
+            match_condition = and_(
+                self.matches_table.c[self.dataset_name] == dataset,
+                or_(
+                    and_(
+                        self.matches_table.c[self.model_id_x] == model_id,
+                        self.matches_table.c[self.model_id_y] == target_model_id,
+                    ),
+                    and_(
+                        self.matches_table.c[self.model_id_x] == target_model_id,
+                        self.matches_table.c[self.model_id_y] == model_id,
+                    ),
+                ),
+            )
+
+        models_table_x, models_table_y = aliased(self.models_table), aliased(self.models_table)
+
+        stmt = (
+            select(
+                self.datasets_table.c[self.dataset_name, self.dataset_id, "tag", "instruction"],
+                models_table_x.c[self.model_name].label(self.model_name_x),
+                models_table_y.c[self.model_name].label(self.model_name_y),
+                self.matches_table.c["score_x", "score_y"],
+            )
+            .join(
+                self.matches_table,
+                self.datasets_table.c[self.dataset_id] == self.matches_table.c[self.dataset_id],
+            )
+            .join(
+                models_table_x,
+                self.matches_table.c[self.model_id_x] == models_table_x.c[self.model_id],
+            )
+            .join(
+                models_table_y,
+                self.matches_table.c[self.model_id_y] == models_table_y.c[self.model_id],
+            )
+            .where(
+                match_condition,
+            )
+        )
+        df = pd.read_sql(stmt, con=self.engine)
+
+        # reorder dataframe
+        df_x = df[df[self.model_name_x] == model]
+        df_y = df[df[self.model_name_y] == model]
+        # switch model_x and model_y
+        df_y = df_y.rename(
+            columns={
+                self.model_name_x: self.model_name_y,
+                self.model_id_x: self.model_id_y,
+                self.model_name_y: self.model_name_x,
+                self.model_id_y: self.model_id_x,
+            }
+        )
+        df = pd.concat((df_x, df_y))
+
+        return df
+
+    def add_matches(self, df: DataFrame) -> None:
+        required_columns = [*self.four_meta_tuple, *self.matches_extra_columns]
+        if not self._check(required_columns, df.columns).all():
+            raise ValueError(f"Columns {required_columns} is required in dataframe.")
+
+        df = df[required_columns]
         self._dump(df, table=self.matches_table)
 
     def generate_matches(

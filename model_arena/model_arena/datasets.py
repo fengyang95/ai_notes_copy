@@ -9,7 +9,6 @@ from sqlalchemy import select, delete
 
 from .base import BaseModule
 
-from typing import Dict, Any
 from pandas.core.frame import DataFrame
 from sqlalchemy.sql.schema import Table
 
@@ -106,7 +105,7 @@ class Datasets(BaseModule):
 
         return df
 
-    def add(self, dataset: str, records: Dict[str, Any]) -> None:
+    def add(self, dataset: str, records: dict[str, object]) -> None:
         if self._check([dataset], self.meta_names).all():
             raise ValueError(
                 f"Duplicate dataset {dataset} found, please use another dataset name.",
@@ -137,7 +136,7 @@ class Datasets(BaseModule):
         self._add_meta(dataset, records=records)
         self._dump(df, table=self.datasets_table)
 
-    def update(self, dataset: str, records: Dict[str, Any]) -> None:
+    def update(self, dataset: str, records: dict[str, object]) -> None:
         raise NotImplementedError("Currently dataset does not support update method.")
 
     def drop(self, dataset: str) -> None:
