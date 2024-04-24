@@ -6,6 +6,12 @@
 
 - Add LLMEngine for inference. ([#11](https://code.byted.org/smart-infra/ModelArena/merge_requests/11))
 - Add match pairing technique. ([#12](https://code.byted.org/smart-infra/ModelArena/merge_requests/12))
+- Add python execution evaluator. ([#13](https://code.byted.org/smart-infra/ModelArena/merge_requests/13))
+
+### Enhancement
+
+- Make GPT request wait time elapsed flexible. ([#14](https://code.byted.org/smart-infra/ModelArena/merge_requests/14))
+- Add support of returned failed evaluation results. ([#15](https://code.byted.org/smart-infra/ModelArena/merge_requests/15))
 
 ### Refactored
 

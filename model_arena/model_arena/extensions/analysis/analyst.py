@@ -156,6 +156,7 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
         transform: Callable | None = None,
         show_plot: bool = False,
         plot_kwargs: dict[str, object] = ...,
+        failed_score: float = 0.0,
         pass_score: float = 2.0,
         perfect_score: float = 4.0,
     ) -> None:
@@ -164,6 +165,7 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
             transform,
             show_plot,
             plot_kwargs,
+            failed_score=failed_score,
             pass_score=pass_score,
             perfect_score=perfect_score,
         )
@@ -172,7 +174,7 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
         print("Nothing to plot for pairwise_score_stat analyst.")
 
     def _analysis(self, df: DataFrame) -> DataFrame:
-        metrics = ["pass_rate", "perfect_rate", "mean"]
+        metrics = ["failed_rate", "pass_rate", "perfect_rate", "mean"]
 
         # group over dataset_id and tag
         df = df.groupby(by=["dataset_id", "tag"])[["score_x", "score_y"]].mean().reset_index()
@@ -184,15 +186,17 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
                 return pd.Series()
 
             # stat calculation
-            pass_rate = (grp["score_x"] == self.pass_score).sum() / grp.shape[0]
+            failed_rate = (grp["score_x"] == self.failed_score).sum() / grp.shape[0]
+            pass_rate = (grp["score_x"] >= self.pass_score).sum() / grp.shape[0]
             perfect_rate = (grp["score_x"] == self.perfect_score).sum() / grp.shape[0]
             mean = (grp["score_x"]).mean()
             # rounding
+            failed_rate = round(failed_rate * 100, 2)
             pass_rate = round(pass_rate * 100, 2)
             perfect_rate = round(perfect_rate * 100, 2)
             mean = round(mean, 2)
 
-            s = pd.Series([pass_rate, perfect_rate, mean], index=metrics)
+            s = pd.Series([failed_rate, pass_rate, perfect_rate, mean], index=metrics)
             return s
 
         df = df.groupby(by=["tag"]).apply(stat, include_groups=False).reset_index()
