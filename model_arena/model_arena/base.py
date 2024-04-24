@@ -1,12 +1,13 @@
 import pandas as pd
 
 from abc import ABC, abstractmethod
-from sqlalchemy import select, MetaData, Table
+from sqlalchemy import select, delete, MetaData, Table
 
 from typing import Union, List, Dict, Any
 from pandas.core.series import Series
 from pandas.core.frame import DataFrame
 from sqlalchemy.engine import Engine
+from sqlalchemy.sql.expression import Executable
 
 
 class Base(ABC):
@@ -38,6 +39,11 @@ class Base(ABC):
     def _dump(self, df: DataFrame, table: Table) -> None:
         table = str(table.name)
         df.to_sql(name=table, con=self.engine, if_exists="append", index=False)
+
+    def _execute(self, stmt: Executable) -> None:
+        with self.engine.connect() as conn:
+            conn.execute(stmt)
+            conn.commit()
 
 
 class BaseModule(Base):
@@ -79,10 +85,20 @@ class BaseModule(Base):
         self.meta = pd.concat((self.meta, meta))
         self._dump(self.meta, table=self.meta_table)
 
+    def drop_meta(self, name: str) -> None:
+        self.meta = self.meta[self.meta[self.meta_name] != name]
+
+        drop_meta_stmt = delete(self.meta_table).where(self.meta_table.c[self.meta_name] == name)
+        self._execute(drop_meta_stmt)
+
     @abstractmethod
     def get(self, names: Union[str, List[str]]) -> pd.DataFrame:
         ...
 
     @abstractmethod
     def update(self, *args) -> None:
+        ...
+
+    @abstractmethod
+    def drop(self, *args) -> None:
         ...

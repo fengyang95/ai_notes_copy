@@ -30,7 +30,10 @@ print(model_arena.datasets.meta)
 # information should be a json serialized string
 #   json.dumps({"component 1": xxx, "component 2": xxx, ...})
 #
-df = pd.DataFrame(columns=["tag", "information"])
+df = pd.DataFrame(
+    [["dummy", json.dumps({"component 1": "xxx", "component 2": "yyy"})]],
+    columns=["tag", "information"],
+)
 model_arena.datasets.raw_datasets.update(
     dataset="new_raw_dataset",
     df=df,
