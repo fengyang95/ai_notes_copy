@@ -115,12 +115,33 @@ class ModelArena(Base):
         self,
         models: Union[str, List[str]],
         datasets: Union[str, List[str]],
+        target_model: Optional[str] = None,
     ) -> DataFrame:
         models = self.models.check(models)
         datasets = self.datasets.check(datasets)
 
+        if target_model is not None:
+            target_model = self.models.check(target_model)[0]
+
         models_table_x = aliased(self.models_table)
         models_table_y = aliased(self.models_table)
+
+        if target_model is None:
+            match_condition = or_(
+                models_table_x.c[self.models.meta_name].in_(models),
+                models_table_y.c[self.models.meta_name].in_(models),
+            )
+        else:
+            match_condition = or_(
+                and_(
+                    models_table_x.c[self.models.meta_name].in_(models),
+                    models_table_y.c[self.models.meta_name] == target_model,
+                ),
+                and_(
+                    models_table_x.c[self.models.meta_name] == target_model,
+                    models_table_y.c[self.models.meta_name].in_(models),
+                ),
+            )
 
         stmt = (
             select(
@@ -145,14 +166,25 @@ class ModelArena(Base):
             .where(
                 and_(
                     self.matches_table.c[self.datasets.meta_name].in_(datasets),
-                    or_(
-                        models_table_x.c[self.models.meta_name].in_(models),
-                        models_table_y.c[self.models.meta_name].in_(models),
-                    ),
+                    match_condition,
                 )
             )
         )
         df = pd.read_sql(stmt, con=self.engine)
+
+        # reorder dataframe
+        df_u = df[df[f"{self.models.meta_name}_x"] == target_model]
+        df_l = df[df[f"{self.models.meta_name}_y"] == target_model]
+        # switch model_x and model_y
+        df_l = df_l.rename(
+            columns={
+                f"{self.models.meta_name}_x": f"{self.models.meta_name}_y",
+                "model_score_x": "model_score_y",
+                f"{self.models.meta_name}_y": f"{self.models.meta_name}_x",
+                "model_score_y": "model_score_x",
+            }
+        )
+        df = pd.concat((df_u, df_l))
 
         return df
 
@@ -273,11 +305,22 @@ class ModelArena(Base):
                 )
             )
         )
-        stmt_y = select(
-            self.matches_table.c[self.datasets.meta_id],
-            self.matches_table.c["model_score_y"].label("model_score"),
-        ).where(
-            self.matches_table.c[f"{self.models.meta_id}_y"] == model_id,
+        stmt_y = (
+            select(
+                self.matches_table.c[self.datasets.meta_id],
+                self.datasets_table.c["tag"],
+                self.matches_table.c["model_score_y"].label("model_score"),
+            )
+            .join(
+                self.datasets_table,
+                self.matches_table.c[self.datasets.meta_id] == self.datasets_table.c[self.datasets.meta_id],
+            )
+            .where(
+                and_(
+                    self.matches_table.c[self.datasets.meta_name] == dataset,
+                    self.matches_table.c[f"{self.models.meta_id}_y"] == model_id,
+                )
+            )
         )
 
         df_x = pd.read_sql(stmt_x, con=self.engine)
@@ -291,15 +334,15 @@ class ModelArena(Base):
         def stat(gdf: DataFrame) -> Series:
             # no zero division
             if gdf.shape == 0:
-                perfect_rate, pass_rate = 0, 0
-                me = 0
-            else:
-                perfect_rate = (gdf["model_score"] == perfect_score).sum() / gdf.shape[0]
-                pass_rate = (gdf["model_score"] >= pass_score).sum() / gdf.shape[0]
-                me = (gdf["model_score"]).mean()
+                return pd.Series()
+
+            perfect_rate = (gdf["model_score"] == perfect_score).sum() / gdf.shape[0]
+            pass_rate = (gdf["model_score"] >= pass_score).sum() / gdf.shape[0]
+            me = (gdf["model_score"]).mean()
 
             perfect_rate = round(perfect_rate * 100, 2)
             pass_rate = round(pass_rate * 100, 2)
+            me = round(me, 2)
 
             s = pd.Series([perfect_rate, pass_rate, me], index=["perfect_rate", "pass_rate", "mean"])
             return s
