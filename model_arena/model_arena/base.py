@@ -114,7 +114,7 @@ class BaseModule(Base):
     def _update_meta(self, name: str, records: dict[str, object]) -> None:
         # update a meta information into meta_table
         meta = pd.DataFrame.from_dict({name: records}, orient="index").reset_index(names=self.meta_name)
-        self._dump(meta, table=self.meta_table)
+        self._dump(meta, table=self.meta_table, upsert=True)
 
     def _drop_meta(self, name: str) -> None:
         # drop a meta information from meta_table

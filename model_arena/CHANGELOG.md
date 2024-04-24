@@ -9,6 +9,7 @@
 - Add analyst extensions. ([#4](https://bits.bytedance.net/code/smart-infra/ModelArena/merge_requests/4))
 - All get methods support multiple models and datasets. ([#5](https://bits.bytedance.net/code/smart-infra/ModelArena/merge_requests/5))
 - Add core llms module. ([#6](https://bits.bytedance.net/code/smart-infra/ModelArena/merge_requests/6))
+- Add needle in a haystack analyst. ([#7](https://bits.bytedance.net/code/smart-infra/ModelArena/merge_requests/7))
 
 ### Refactored
 

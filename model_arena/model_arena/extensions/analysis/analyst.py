@@ -1,6 +1,11 @@
+import json
+import math
 import numpy as np
 import pandas as pd
 import numpy.typing as npt
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 from abc import ABC, abstractmethod
 from scipy.optimize import fsolve
@@ -16,8 +21,15 @@ class BaseAnalyst(ABC):
 
     transform: Callable | None = None
 
-    def __init__(self, transform: Callable | None = None) -> None:
+    def __init__(
+        self,
+        transform: Callable | None = None,
+        use_plot: bool = False,
+        plot_kwargs: dict[str, object] = {},
+    ) -> None:
         self.transform = transform
+        self.use_plot = use_plot
+        self.plot_kwargs = plot_kwargs
 
     def _transform(self, outputs: Series) -> Series:
         if self.transform is None:
@@ -27,12 +39,33 @@ class BaseAnalyst(ABC):
         return outputs_transformed
 
     @abstractmethod
+    def _plot(self, df: DataFrame, **kwargs: dict[str, object]) -> None:
+        ...
+
+    @abstractmethod
     def analysis(self, df: DataFrame) -> DataFrame:
         ...
 
 
 class UnaryAnalyst(BaseAnalyst):
-    ...
+    analysis_method: str = "unary"
+
+    score_column: str = "score"
+
+    @abstractmethod
+    def _analysis(self, df: DataFrame) -> DataFrame:
+        ...
+
+    def analysis(self, df: DataFrame) -> DataFrame:
+        # transform scores
+        df[self.score_column] = self._transform(df[self.score_column])
+        # analysis dataframe
+        df = self._analysis(df)
+        # plot analysis result
+        if self.use_plot:
+            self._plot(df, **self.plot_kwargs)
+
+        return df
 
 
 class PairwiseAnalyst(BaseAnalyst):
@@ -46,11 +79,88 @@ class PairwiseAnalyst(BaseAnalyst):
         ...
 
     def analysis(self, df: DataFrame) -> DataFrame:
-        # transform outputs
-        df[self.score_x_columm] = df[self.score_x_columm].apply(self._transform)
-        df[self.score_y_column] = df[self.score_y_column].apply(self._transform)
+        # transform scores
+        df[self.score_x_columm] = self._transform(df[self.score_x_columm])
+        df[self.score_y_column] = self._transform(df[self.score_y_column])
         # analysis dataframe
         df = self._analysis(df)
+        # plot analysis result
+        if self.use_plot:
+            self._plot(df, **self.plot_kwargs)
+
+        return df
+
+
+class NeedleInAHaystackAnalyst(UnaryAnalyst):
+    analyst: str = "needle_in_a_haystack"
+
+    def __init__(
+        self,
+        transform: Callable | None = None,
+        tokenize: Callable = lambda x: len(x),
+        use_plot: bool = False,
+        plot_kwargs: dict[str, object] = {},
+    ) -> None:
+        super().__init__(transform, use_plot, plot_kwargs)
+
+        self.tokenize = tokenize
+
+    def _construct_cmap(self) -> mcolors.LinearSegmentedColormap:
+        pos = [0, 0.4, 0.55, 0.65, 0.85, 1]
+        colors = ["#EC7461", "#F1A257", "#F5C759", "#C3BF6F", "#8FD780", "#63D3A5"]
+
+        cmap = mcolors.LinearSegmentedColormap.from_list(
+            "",
+            list(zip(pos, colors)),
+        )
+        return cmap
+
+    def _plot(self, df: DataFrame, threshold: float = 0.8, image: str = "analysis.png") -> None:
+        # reshape dataframe
+        df = df.pivot(index="pos", columns="ctx", values="rate")
+
+        # plot
+        ax = sns.heatmap(
+            df,
+            cmap=self._construct_cmap(),
+            annot=df[df < threshold].fillna(""),
+            fmt="",
+            cbar_kws={"label": "Accuracy of Retrieval"},
+        )
+        ax.set(
+            xlabel="Context length (unit: k)",
+            ylabel="Needle Depth",
+        )
+
+        # save plot
+        plt.savefig(image, dpi=800)
+
+    def _analysis(self, df: DataFrame) -> DataFrame:
+        idf: DataFrame = df["information"].apply(lambda x: pd.Series(json.loads(x)))
+        idf["prefix_length"] = idf["prefix"].apply(self.tokenize)
+        idf["postfix_length"] = idf["postfix"].apply(self.tokenize)
+        idf["total_length"] = idf["prefix_length"] + idf["postfix_length"]
+
+        # context length
+        idf["ctx"] = idf["total_length"].apply(lambda x: x // 1000)
+        # needle position
+        idf["pos"] = (idf["prefix_length"] / idf["total_length"]).apply(
+            lambda x: math.floor(x * 10) * 1.0 / 10,
+        )
+
+        # concat final dataframe
+        df = pd.concat((idf[["ctx", "pos"]], df[self.score_column]), axis=1)
+
+        # stat over ctx, pos
+        def stat(grp: DataFrame) -> Series:
+            # avoid zero division
+            if grp.shape[0] == 0:
+                return pd.Series()
+
+            rate = round(grp[self.score_column].sum() / grp.shape[0], 2)
+            return pd.Series([rate], index=["rate"])
+
+        df = df.groupby(by=["ctx", "pos"]).apply(stat, include_groups=False).reset_index()
 
         return df
 
@@ -63,11 +173,16 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
         transform: Callable | None = None,
         pass_score: float = 2.0,
         perfect_score: float = 4.0,
+        use_plot: bool = False,
+        plot_kwargs: dict[str, object] = {},
     ) -> None:
-        super().__init__(transform)
+        super().__init__(transform, use_plot, plot_kwargs)
 
         self.pass_score = pass_score
         self.perfect_score = perfect_score
+
+    def _plot(self, df: DataFrame, **kwargs: dict[str, object]) -> None:
+        print("Nothing to plot for pairwise_score_stat analyst.")
 
     def _analysis(self, df: DataFrame) -> DataFrame:
         metrics = ["pass_rate", "perfect_rate", "mean"]
@@ -82,15 +197,15 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
         )
 
         # stat over tag
-        def stat(gdf: DataFrame) -> Series:
+        def stat(grp: DataFrame) -> Series:
             # avoid zero division
-            if gdf.shape[0] == 0:
+            if grp.shape[0] == 0:
                 return pd.Series()
 
             # stat calculation
-            pass_rate = (gdf[self.score_x_columm] == self.pass_score).sum() / gdf.shape[0]
-            perfect_rate = (gdf[self.score_x_columm] == self.perfect_score).sum() / gdf.shape[0]
-            mean = (gdf[self.score_x_columm]).mean()
+            pass_rate = (grp[self.score_x_columm] == self.pass_score).sum() / grp.shape[0]
+            perfect_rate = (grp[self.score_x_columm] == self.perfect_score).sum() / grp.shape[0]
+            mean = (grp[self.score_x_columm]).mean()
             # rounding
             pass_rate = round(pass_rate * 100, 2)
             perfect_rate = round(perfect_rate * 100, 2)
@@ -112,11 +227,16 @@ class EloRatingAnalyst(PairwiseAnalyst):
         transform: Callable | None = None,
         shift: int = 1500,
         scale: int = 400,
+        use_plot: bool = False,
+        plot_kwargs: dict[str, object] = {},
     ) -> None:
-        super().__init__(transform)
+        super().__init__(transform, use_plot, plot_kwargs)
 
         self.shift = shift
         self.scale = scale
+
+    def _plot(self, df: DataFrame, **kwargs: dict[str, object]) -> None:
+        print("Nothing to plot for elo_rating analyst.")
 
     def _analysis(self, df: DataFrame) -> DataFrame:
 

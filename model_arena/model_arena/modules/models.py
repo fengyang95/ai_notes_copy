@@ -45,7 +45,7 @@ class Models(BaseModule):
             )
         # update meta
         records.update({self.meta_id: self.get_model_id(model)})
-        self._add_meta(model, records)
+        self._update_meta(model, records)
 
     def drop(self, model: str) -> None:
         if not self._check([model], self.meta_names).all():
@@ -63,6 +63,14 @@ class Models(BaseModule):
         model_id = pd.read_sql(model_id_stmt, con=self.engine)[self.meta_id].values[0]
 
         return model_id
+
+    def get_model_path(self, model: str) -> str:
+        model_path_stmt = select(
+            self.meta_table.c["model_path"],
+        ).where(self.meta_table.c[self.meta_name] == model)
+        model_path = pd.read_sql(model_path_stmt, con=self.engine)["model_path"].values[0]
+
+        return model_path
 
     def get_model_name(self, model_id: str) -> str:
         model_name_stmt = select(
