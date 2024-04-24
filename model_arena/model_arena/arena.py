@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from scipy.optimize import fsolve
-from sqlalchemy import select, and_, or_
+from sqlalchemy import create_engine, select, and_, or_
 from sqlalchemy.orm import aliased
 
 from .base import Base
@@ -17,6 +17,7 @@ from sqlalchemy.sql.schema import Table
 
 
 class ModelArena(Base):
+    default_db_psm: str = "toutiao.mysql.model_arena_write"
     inferences_table: Table
     matches_table: Table
 
@@ -30,7 +31,24 @@ class ModelArena(Base):
         self.inferences_table = self._load_table(table_name="inferences")
         self.matches_table = self._load_table(table_name="matches")
 
-    def __init__(self, engine: Engine) -> None:
+    def _create_default_engine(self) -> Engine:
+        try:
+            import bytedmysql
+        except ImportError as e:
+            print(
+                "ModelArena default database is hosted on RDS in bytedance. "
+                "To use it, you have to install bytedmysql by:\npip install -i https://bytedpypi.byted.org/simple/\n"
+            )
+            raise e
+
+        uri = f"mysql+bytedmysql://:@/?db_psm={self.default_db_psm}"
+        engine = create_engine(uri)
+        return engine
+
+    def __init__(self, engine: Optional[Engine] = None) -> None:
+        if engine is None:
+            engine = self._create_default_engine()
+
         super().__init__(engine)
 
     def get_inferences(
@@ -173,8 +191,8 @@ class ModelArena(Base):
         df = pd.read_sql(stmt, con=self.engine)
 
         # reorder dataframe
-        df_u = df[df[f"{self.models.meta_name}_x"] == target_model]
-        df_l = df[df[f"{self.models.meta_name}_y"] == target_model]
+        df_u = df[df[f"{self.models.meta_name}_x"].isin(models)]
+        df_l = df[df[f"{self.models.meta_name}_y"].isin(models)]
         # switch model_x and model_y
         df_l = df_l.rename(
             columns={
