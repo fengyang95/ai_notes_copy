@@ -1,21 +1,22 @@
 import uuid
 import json
+import numpy as np
 import pandas as pd
+import numpy.typing as npt
+import pandas.api.types as ptypes
 
 from sqlalchemy import select, delete
 
 from .base import BaseModule
 
-from typing import Union, List, Dict, Any
+from typing import Dict, Any
 from pandas.core.frame import DataFrame
-from sqlalchemy.engine import Engine
 from sqlalchemy.sql.schema import Table
 
 
 class RawDatasets(BaseModule):
     meta_name: str = "dataset_name"
     meta_id: str = "dataset_id"
-
     raw_datasets_table: Table
 
     def _preload(self) -> None:
@@ -23,57 +24,60 @@ class RawDatasets(BaseModule):
         # load raw_datsets_table
         self.raw_datasets_table = self._load_table(table_name="rawdatasets")
 
-    def __init__(self, engine: Engine) -> None:
-        super().__init__(engine)
-
-    def get(self, datasets: Union[str, List[str]]) -> DataFrame:
+    def get(self, datasets: str | npt.ArrayLike) -> DataFrame:
         datasets = self.check(datasets)
         stmt = select(self.raw_datasets_table).where(self.raw_datasets_table.c[self.meta_name].in_(datasets))
         df = pd.read_sql(stmt, con=self.engine)
+        if "id" in df.columns:
+            df = df.drop(columns=["id"])
 
         return df
 
-    def update(self, dataset: str, df: DataFrame) -> None:
-        if all(self._check([dataset], self.meta[self.meta_name])):
+    def add(self, dataset: str, df: DataFrame) -> None:
+        if self._check([dataset], self.meta_names).all():
             raise ValueError(
-                f"Duplicate name {dataset} found, please use another raw dataset name.",
+                f"Duplicate raw dataset {dataset} found, please use another raw dataset name.",
             )
 
-        # required columns
-        required_columns = ["tag", "information"]
-        if not all(self._check(required_columns, df.columns)):
+        # columns information
+        required_columns = np.array(["tag", "information"])
+        optional_columns = np.array(["output"])
+
+        if not self._check(required_columns, df.columns).all():
             raise ValueError(
                 f"Columns {required_columns} is required in dataframe.",
             )
-        # optional columns
-        optional_columns = ["output"]
-        if all(self._check(optional_columns, df.columns)):
-            required_columns += optional_columns
-        df = df[required_columns]
+        optional_columns = optional_columns[self._check(optional_columns, df.columns)]
+        all_columns = np.concatenate((required_columns, optional_columns))
+        df = df[all_columns]
+
+        # convet informatin type
+        if not ptypes.is_string_dtype(df["information"]):
+            df["information"] = df["information"].apply(lambda x: json.dumps(x))
 
         # update data
         df.loc[:, self.meta_name] = dataset
         df.loc[:, self.meta_id] = [uuid.uuid4().hex for _ in range(df.shape[0])]
 
         # final columns
-        final_columns = [self.meta_name, self.meta_id] + required_columns
+        final_columns = np.concatenate(([self.meta_name, self.meta_id], all_columns))
         df = df[final_columns]
 
-        # insert data
+        # add meta and data
+        self._add_meta(dataset, records={"length": df.shape[0]})
         self._dump(df, table=self.raw_datasets_table)
 
-        # update meta
-        records = {"length": df.shape[0]}
-        self.update_meta(dataset, records)
+    def update(self, dataset: str, df: DataFrame) -> None:
+        raise NotImplementedError("Currently raw dataset does not support update method.")
 
     def drop(self, dataset: str) -> None:
-        if not all(self._check([dataset], self.meta[self.meta_name])):
+        if not self._check([dataset], self.meta_names).all():
             raise ValueError(
                 f"Name {dataset} not found, please check raw dataset name.",
             )
 
         # drop meta
-        self.drop_meta(dataset)
+        self._drop_meta(dataset)
         # drop data
         drop_data_stmt = delete(self.raw_datasets_table).where(self.raw_datasets_table.c[self.meta_name] == dataset)
         self._execute(drop_data_stmt)
@@ -82,7 +86,6 @@ class RawDatasets(BaseModule):
 class Datasets(BaseModule):
     meta_name: str = "dataset_name"
     meta_id: str = "dataset_id"
-
     datasets_table: Table
 
     raw_datasets: RawDatasets
@@ -94,51 +97,57 @@ class Datasets(BaseModule):
         # load raw_datasets
         self.raw_datasets = RawDatasets(self.engine)
 
-    def __init__(self, engine: Engine) -> None:
-        super().__init__(engine)
-
-    def get(self, datasets: Union[str, List[str]]) -> DataFrame:
+    def get(self, datasets: str | npt.ArrayLike) -> DataFrame:
         datasets = self.check(datasets)
         stmt = select(self.datasets_table).where(self.datasets_table.c[self.meta_name].in_(datasets))
         df = pd.read_sql(stmt, con=self.engine)
+        if "id" in df.columns:
+            df = df.drop(columns=["id"])
 
         return df
 
-    def update(self, dataset: str, records: Dict[str, Any]) -> None:
-        if all(self._check([dataset], self.meta[self.meta_name])):
+    def add(self, dataset: str, records: Dict[str, Any]) -> None:
+        if self._check([dataset], self.meta_names).all():
             raise ValueError(
-                f"Duplicate name {dataset} found, please use another dataset name.",
+                f"Duplicate dataset {dataset} found, please use another dataset name.",
             )
 
-        raw_dataset = records["raw_dataset"]
-        template = records["instruction_template"]
+        # find raw_dataset and instruction_template in records
+        raw_dataset_name = records["raw_dataset_name"]
+        instruction_template = records["instruction_template"]
 
-        raw_df = self.raw_datasets.get(raw_dataset)
+        # get raw dataset
+        raw_df = self.raw_datasets.get(raw_dataset_name)
 
+        # transforme raw dataset
+        raw_df = raw_df.rename(columns={self.raw_datasets.meta_id: "raw_dataset_id"})
+        raw_df["instruction"] = raw_df["information"].apply(lambda x: instruction_template.format(**json.loads(x)))
+
+        # update raw dataset
         raw_df[self.meta_name] = dataset
         raw_df[self.meta_id] = [uuid.uuid4().hex for _ in range(raw_df.shape[0])]
-        raw_df["instruction"] = raw_df["information"].apply(lambda x: template.format(**json.loads(x)))
 
         # final columns
-        final_columns = [self.meta_name, self.meta_id, "tag", "instruction", "output"]
-        raw_df = raw_df[final_columns]
-
-        # insert data
-        self._dump(raw_df, table=self.datasets_table)
+        final_columns = np.array([self.meta_name, self.meta_id, "raw_dataset_id", "tag", "instruction", "output"])
+        df = raw_df[final_columns]
 
         # update records
-        records["length"] = raw_df.shape[0]
-        # update meta
-        self.update_meta(dataset, records)
+        records["length"] = df.shape[0]
+        # add meta and data
+        self._add_meta(dataset, records=records)
+        self._dump(df, table=self.datasets_table)
+
+    def update(self, dataset: str, records: Dict[str, Any]) -> None:
+        raise NotImplementedError("Currently dataset does not support update method.")
 
     def drop(self, dataset: str) -> None:
-        if not all(self._check([dataset], self.meta[self.meta_name])):
+        if not self._check([dataset], self.meta_names).all():
             raise ValueError(
                 f"Name {dataset} not found, please check dataset name.",
             )
 
         # drop meta
-        self.drop_meta(dataset)
+        self._drop_meta(dataset)
         # drop data
         drop_data_stmt = delete(self.datasets_table).where(self.datasets_table.c[self.meta_name] == dataset)
         self._execute(drop_data_stmt)

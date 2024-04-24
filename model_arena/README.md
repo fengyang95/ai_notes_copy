@@ -13,11 +13,10 @@ pip install git+ssh://git@code.byted.org/smart-infra/ModelArena.git@dev
 ### Initialization
 
 ```python
-from sqlalchemy import create_engine
+import pandas as pd
 from model_arena import ModelArena
 
-engine = create_engine("")
-model_arena = ModelArena(engine)
+model_arena = ModelArena()
 ```
 
 ### Datasets
@@ -26,38 +25,42 @@ model_arena = ModelArena(engine)
 # show all datasets meta information
 print(model_arena.datasets.meta)
 
-# update a raw dataset
-# information should be a json serialized string
-#   json.dumps({"component 1": xxx, "component 2": xxx, ...})
-#
+# add a raw dataset
+# information should be a dictionary contains all components
 df = pd.DataFrame(
-    [["dummy", json.dumps({"component 1": "xxx", "component 2": "yyy"})]],
+    [["demo", {"component 1": "xxx", "component 2": "yyy"}]],
     columns=["tag", "information"],
 )
-model_arena.datasets.raw_datasets.update(
-    dataset="new_raw_dataset",
+model_arena.datasets.raw_datasets.add(
+    dataset="new_raw_dataset_v0",
+    df=df,
+)
+# output is optional for raw dataset
+df = pd.DataFrame(
+    [["demo", {"component 1": "xxx", "component 2": "yyy"}, "demo_output"]],
+    columns=["tag", "information", "output"],
+)
+model_arena.datasets.raw_datasets.add(
+    dataset="new_raw_dataset_v1",
     df=df,
 )
 
-# update a dataset
+# add a dataset
 # instruction template is used to combined the components defined
 # inside information
-model_arena.datasets.update(
-    dataset="new_dataset_v1",
+model_arena.datasets.add(
+    dataset="new_dataset_v0",
     records={
-        "raw_dataset": "new_raw_dataset",
+        "raw_dataset_name": "new_raw_dataset_v0",
         "instruction_template": "Component 1: {component 1}, Component 2: {component 2}", 
     },
 )
-
-# generate a new dataset from previous dataset
-model_arena.datasets.update(
-    dataset="new_dataset_v2",
+model_arena.datasets.add(
+    dataset="new_dataset_v1",
     records={
-        "raw_dataset": "new_dataset",
-        # support we do not need component 2 anymore
+        "raw_dataset_name": "new_raw_dataset_v1",
         "instruction_template": "Component 1: {component 1}", 
-    }
+    },
 )
 ```
 
@@ -68,7 +71,7 @@ model_arena.datasets.update(
 print(model_arena.models.meta)
 
 # update a new model information
-model_arena.models.update(
+model_arena.models.add(
     model="new_model",
     records={
         # optional fields, however, high recommend to fill them
