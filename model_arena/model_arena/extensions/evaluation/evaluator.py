@@ -1,75 +1,136 @@
-from abc import ABC, abstractmethod
+import re
+import time
+import pandas as pd
+
+from tqdm.auto import tqdm
+from abc import abstractmethod
+
+from ..base import BaseExtension
 
 from typing import Callable
 from pandas.core.series import Series
 from pandas.core.frame import DataFrame
 
+DEFAULT_PROMPT = """You are a fair judge to decide which answer is better.
+You should assign an integer score to each answer, with a perfect answer will have a score of 4.
+The difference of scores MUST reflect your true preference.
 
-class BaseEvaluator(ABC):
-    evaluator: str = "base"
-    evaluation_type: type
-    evaluation_method: str
+The Question is:
+{instruction}
 
-    transform: Callable | None = None
-    ignore_output: str | None = None
+The first answer is:
+{output_y}
 
-    output_column: str = "output"
-    label_column: str = "label"
+The second answer is:
+{output_x}
 
-    def __init__(self, transform: Callable | None = None, ignore_output: str | None = None) -> None:
-        self.transform = transform
-        self.ignore_output = ignore_output
+**DO NOT** explain the reason.
+ONLY return a tuple of two scores, with the following format: (INT, INT)
+"""
 
-    def _ignore(self, df: DataFrame) -> DataFrame:
-        if self.ignore_output is None:
-            return df
 
-        df = df[df[self.output_column] != self.ignore_output]
-        return df
+class BaseEvaluator(BaseExtension):
+    extension_name: str = "base"
 
-    def _transform(self, outputs: Series) -> Series:
-        if self.transform is None:
-            return outputs
+    show_progress: bool = False
 
-        outputs_transformed = outputs.apply(lambda x: self.transform(x))
-        return outputs_transformed
+    def __init__(
+        self,
+        ignore: Callable | None = None,
+        transform: Callable | None = None,
+        show_progress: bool = False,
+        **kwargs: dict[str, object],
+    ) -> None:
+        kwargs.update({"show_progress": show_progress})
+        super().__init__(ignore, transform, **kwargs)
+
+        tqdm.pandas(disable=not self.show_progress)
 
     @abstractmethod
-    def evaluate(self, df: DataFrame) -> DataFrame:
+    def _evaluate(self, df: DataFrame) -> DataFrame:
         ...
+
+    def evaluate(self, df: DataFrame) -> DataFrame:
+        # preprocess dataframe with _ignore and _transform
+        df = self._preprocess(df)
+        # evaluate
+        df.loc[:, "auditor"] = self.extension_name
+        df = self._evaluate(df)
+
+        return df
 
 
 class UnaryEvaluator(BaseEvaluator):
-    evaluation_method: str = "unary"
+    extension_method: str = "unary"
 
-    @abstractmethod
-    def _evaluate(self, outputs: Series, labels: Series) -> Series:
-        ...
-
-    def evaluate(self, df: DataFrame) -> DataFrame:
-        # ignore outputs
-        df = self._ignore(df)
-        # transform outputs
-        outputs: Series = self._transform(df[self.output_column])
-        labels: Series = df[self.label_column]
-        # calculate scores
-        scores = self._evaluate(outputs, labels)
-        # assign scores
-        df.loc[:, "auditor"] = self.evaluator
-        df.loc[:, "score"] = scores
-
-        return df
+    ignore_columns: list[str] = ["output"]
+    transform_columns: list[str] = ["output"]
 
 
 class PairwiseEvaluator(BaseEvaluator):
-    evaluation_method: str = "pairwise"
+    extension_method: str = "pairwise"
+
+    ignore_columns: list[str] = ["output_x", "output_y"]
+    transform_columns: list[str] = ["output_x", "output_y"]
 
 
 class ExactMatchEvaluator(UnaryEvaluator):
-    evaluator: str = "exact_match"
-    evaluation_type: type = bool
+    extension_name: str = "exact_match"
 
-    def _evaluate(self, outputs: Series, labels: Series) -> Series:
-        # calculate exact match scores
-        scores: Series = (outputs == labels).astype(int)
-        return scores
+    def _evaluate(self, df: DataFrame) -> DataFrame:
+        df["score"] = df.progress_apply(lambda x: int(x["output"] == x["label"]), axis=1)
+        return df
+
+
+class ChatGPTEvaluator(PairwiseEvaluator):
+    extension_name: str = "{model}"
+
+    def __init__(
+        self,
+        ignore: Callable | None = None,
+        transform: Callable | None = None,
+        show_progress: bool = False,
+        model: str = "gpt-4-0613",
+        prompt: str | None = None,
+        num_retries: int = 3,
+    ) -> None:
+        from ...core import BytedChatGPT
+
+        super().__init__(
+            ignore,
+            transform,
+            show_progress,
+            model=model,
+            prompt=prompt if prompt else DEFAULT_PROMPT,
+            num_retries=num_retries,
+        )
+        self.llm = BytedChatGPT(model=self.model)
+        self.extension_name = self.extension_name.format(model=self.model)
+
+    def _evaluate_once(self, row: Series) -> Series:
+        for _ in range(self.num_retries):
+            # avoid high qps for gpt requests
+            time.sleep(2)
+            try:
+                results = self.llm.invoke(
+                    self.prompt.format(
+                        instruction=row["instruction"],
+                        output_x=row["output_x"],
+                        output_y=row["output_y"],
+                    )
+                )
+                if scores := re.search(r"\(\d,[ ]?\d\)", results)[0]:
+                    return pd.Series(
+                        tuple(map(int, scores[1:-1].replace(", ", ",").split(","))),
+                        index=["score_x", "score_y"],
+                    )
+                else:
+                    continue
+            except Exception:
+                continue
+
+        return pd.Series((-1, -1), index=["score_x", "score_y"])
+
+    def _evaluate(self, df: DataFrame) -> DataFrame:
+        df[["score_x", "score_y"]] = df.progress_apply(self._evaluate_once, axis=1)
+        return df

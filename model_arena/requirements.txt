@@ -1,5 +1,7 @@
+tqdm
 numpy
 scipy
 pandas
 seaborn
+requests
 sqlalchemy

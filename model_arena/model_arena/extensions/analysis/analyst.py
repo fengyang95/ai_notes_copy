@@ -7,103 +7,85 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from scipy.optimize import fsolve
+
+from ..base import BaseExtension
 
 from typing import Callable
 from pandas.core.series import Series
 from pandas.core.frame import DataFrame
 
 
-class BaseAnalyst(ABC):
-    analyst: str = "base"
-    analysis_method: str
+class BaseAnalyst(BaseExtension):
+    extension_name: str = "base"
 
-    transform: Callable | None = None
+    show_plot: bool = False
+    plot_kwargs: dict[str, object] = ...
 
     def __init__(
         self,
+        ignore: Callable | None = None,
         transform: Callable | None = None,
-        use_plot: bool = False,
-        plot_kwargs: dict[str, object] = {},
+        show_plot: bool = False,
+        plot_kwargs: dict[str, object] = ...,
+        **kwargs: dict[str, object],
     ) -> None:
-        self.transform = transform
-        self.use_plot = use_plot
-        self.plot_kwargs = plot_kwargs
-
-    def _transform(self, outputs: Series) -> Series:
-        if self.transform is None:
-            return outputs
-
-        outputs_transformed = outputs.apply(lambda x: self.transform(x))
-        return outputs_transformed
+        kwargs.update({"show_plot": show_plot, "plot_kwargs": plot_kwargs})
+        super().__init__(ignore, transform, **kwargs)
 
     @abstractmethod
     def _plot(self, df: DataFrame, **kwargs: dict[str, object]) -> None:
         ...
 
     @abstractmethod
-    def analysis(self, df: DataFrame) -> DataFrame:
+    def _analysis(self, df: DataFrame) -> DataFrame:
         ...
+
+    def analysis(self, df: DataFrame) -> DataFrame:
+        # preprocess dataframe with _ignore and _transform
+        df = self._preprocess(df)
+        # analysis
+        df = self._analysis(df)
+        # plot analysis result
+        if self.show_plot:
+            self._plot(df, **self.plot_kwargs)
+
+        return df
 
 
 class UnaryAnalyst(BaseAnalyst):
-    analysis_method: str = "unary"
+    extension_method: str = "unary"
 
-    score_column: str = "score"
-
-    @abstractmethod
-    def _analysis(self, df: DataFrame) -> DataFrame:
-        ...
-
-    def analysis(self, df: DataFrame) -> DataFrame:
-        # transform scores
-        df[self.score_column] = self._transform(df[self.score_column])
-        # analysis dataframe
-        df = self._analysis(df)
-        # plot analysis result
-        if self.use_plot:
-            self._plot(df, **self.plot_kwargs)
-
-        return df
+    ignore_columns: list[str] = ["score"]
+    transform_columns: list[str] = ["score"]
 
 
 class PairwiseAnalyst(BaseAnalyst):
-    analysis_method: str = "pairwise"
+    extension_method: str = "pairwise"
 
-    score_x_columm: str = "score_x"
-    score_y_column: str = "score_y"
-
-    @abstractmethod
-    def _analysis(self, df: DataFrame) -> DataFrame:
-        ...
-
-    def analysis(self, df: DataFrame) -> DataFrame:
-        # transform scores
-        df[self.score_x_columm] = self._transform(df[self.score_x_columm])
-        df[self.score_y_column] = self._transform(df[self.score_y_column])
-        # analysis dataframe
-        df = self._analysis(df)
-        # plot analysis result
-        if self.use_plot:
-            self._plot(df, **self.plot_kwargs)
-
-        return df
+    ignore_columns: list[str] = ["score_x", "score_y"]
+    transform_columns: list[str] = ["score_x", "score_y"]
 
 
 class NeedleInAHaystackAnalyst(UnaryAnalyst):
-    analyst: str = "needle_in_a_haystack"
+    extension_name: str = "needle_in_a_haystack"
 
     def __init__(
         self,
+        ignore: Callable | None = None,
         transform: Callable | None = None,
+        show_plot: bool = False,
+        plot_kwargs: dict[str, object] = ...,
         tokenize: Callable = lambda x: len(x),
-        use_plot: bool = False,
-        plot_kwargs: dict[str, object] = {},
     ) -> None:
-        super().__init__(transform, use_plot, plot_kwargs)
-
-        self.tokenize = tokenize
+        super().__init__(
+            ignore,
+            transform,
+            show_plot,
+            plot_kwargs,
+            tokenize=tokenize,
+        )
 
     def _construct_cmap(self) -> mcolors.LinearSegmentedColormap:
         pos = [0, 0.4, 0.55, 0.65, 0.85, 1]
@@ -149,7 +131,7 @@ class NeedleInAHaystackAnalyst(UnaryAnalyst):
         )
 
         # concat final dataframe
-        df = pd.concat((idf[["ctx", "pos"]], df[self.score_column]), axis=1)
+        df = pd.concat((idf[["ctx", "pos"]], df[["score"]]), axis=1)
 
         # stat over ctx, pos
         def stat(grp: DataFrame) -> Series:
@@ -157,7 +139,7 @@ class NeedleInAHaystackAnalyst(UnaryAnalyst):
             if grp.shape[0] == 0:
                 return pd.Series()
 
-            rate = round(grp[self.score_column].sum() / grp.shape[0], 2)
+            rate = round(grp["score"].sum() / grp.shape[0], 2)
             return pd.Series([rate], index=["rate"])
 
         df = df.groupby(by=["ctx", "pos"]).apply(stat, include_groups=False).reset_index()
@@ -166,20 +148,25 @@ class NeedleInAHaystackAnalyst(UnaryAnalyst):
 
 
 class PairwiseScoreStatAnalyst(PairwiseAnalyst):
-    analyst: str = "pairwise_score_stat"
+    extension_name: str = "pairwise_score_stat"
 
     def __init__(
         self,
+        ignore: Callable | None = None,
         transform: Callable | None = None,
+        show_plot: bool = False,
+        plot_kwargs: dict[str, object] = ...,
         pass_score: float = 2.0,
         perfect_score: float = 4.0,
-        use_plot: bool = False,
-        plot_kwargs: dict[str, object] = {},
     ) -> None:
-        super().__init__(transform, use_plot, plot_kwargs)
-
-        self.pass_score = pass_score
-        self.perfect_score = perfect_score
+        super().__init__(
+            ignore,
+            transform,
+            show_plot,
+            plot_kwargs,
+            pass_score=pass_score,
+            perfect_score=perfect_score,
+        )
 
     def _plot(self, df: DataFrame, **kwargs: dict[str, object]) -> None:
         print("Nothing to plot for pairwise_score_stat analyst.")
@@ -188,13 +175,7 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
         metrics = ["pass_rate", "perfect_rate", "mean"]
 
         # group over dataset_id and tag
-        df = (
-            df.groupby(
-                by=["dataset_id", "tag"],
-            )[[self.score_x_columm, self.score_y_column]]
-            .mean()
-            .reset_index()
-        )
+        df = df.groupby(by=["dataset_id", "tag"])[["score_x", "score_y"]].mean().reset_index()
 
         # stat over tag
         def stat(grp: DataFrame) -> Series:
@@ -203,9 +184,9 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
                 return pd.Series()
 
             # stat calculation
-            pass_rate = (grp[self.score_x_columm] == self.pass_score).sum() / grp.shape[0]
-            perfect_rate = (grp[self.score_x_columm] == self.perfect_score).sum() / grp.shape[0]
-            mean = (grp[self.score_x_columm]).mean()
+            pass_rate = (grp["score_x"] == self.pass_score).sum() / grp.shape[0]
+            perfect_rate = (grp["score_x"] == self.perfect_score).sum() / grp.shape[0]
+            mean = (grp["score_x"]).mean()
             # rounding
             pass_rate = round(pass_rate * 100, 2)
             perfect_rate = round(perfect_rate * 100, 2)
@@ -220,20 +201,25 @@ class PairwiseScoreStatAnalyst(PairwiseAnalyst):
 
 
 class EloRatingAnalyst(PairwiseAnalyst):
-    analyst: str = "elo_rating"
+    extension_name: str = "elo_rating"
 
     def __init__(
         self,
+        ignore: Callable | None = None,
         transform: Callable | None = None,
+        show_plot: bool = False,
+        plot_kwargs: dict[str, object] = ...,
         shift: int = 1500,
         scale: int = 400,
-        use_plot: bool = False,
-        plot_kwargs: dict[str, object] = {},
     ) -> None:
-        super().__init__(transform, use_plot, plot_kwargs)
-
-        self.shift = shift
-        self.scale = scale
+        super().__init__(
+            ignore,
+            transform,
+            show_plot,
+            plot_kwargs,
+            shift=shift,
+            scale=scale,
+        )
 
     def _plot(self, df: DataFrame, **kwargs: dict[str, object]) -> None:
         print("Nothing to plot for elo_rating analyst.")

@@ -6,7 +6,7 @@ from sqlalchemy.orm import aliased
 from .base import Base
 from .modules.datasets import Datasets
 from .modules.models import Models
-from .extensions.evaluation import UnaryEvaluator
+from .extensions.evaluation import UnaryEvaluator, PairwiseEvaluator
 from .extensions.analysis import BaseAnalyst
 
 from pandas.core.frame import DataFrame
@@ -45,7 +45,8 @@ class ModelArena(Base):
         except ImportError as e:
             print(
                 "ModelArena default database is hosted on RDS in bytedance. "
-                "To use it, you have to install bytedmysql by:\npip install -i https://bytedpypi.byted.org/simple/\n"
+                "To use it, you have to install bytedmysql by:\n"
+                "pip install -i https://bytedpypi.byted.org/simple/ bytedmysql\n"
             )
             raise e
 
@@ -272,14 +273,17 @@ class ModelArena(Base):
 
         return df
 
-    def evaluate(self, dataset: str, model: str, evaluator: UnaryEvaluator) -> None:
-        assert evaluator.evaluation_method == "unary", "You have to use an unary evaluator."
-        # generate evaluation table
+    def evaluate(self, dataset: str, model: str, evaluator: UnaryEvaluator, upload: bool = True) -> DataFrame:
+        assert evaluator.extension_method == "unary", "You have to use an unary evaluator."
+        # generate evaluation dataframe
         df = self._generate_evaluations(dataset, model)
         # use evaluator to evaluate the result
         df = evaluator.evaluate(df)
-        # add evaluation table
-        self.add_evaluations(df)
+        if upload:
+            # add evaluation dataframe
+            self.add_evaluations(df)
+
+        return df
 
     def _generate_matches(
         self,
@@ -380,9 +384,24 @@ class ModelArena(Base):
         df = df[required_columns]
         self._dump(df, table=self.matches_table)
 
-    def match(self, dataset: str, model: str, target_model: str, judge: None) -> None:
-        # TODO: use a judge to automatically judge between two models
-        raise NotImplementedError
+    def match(
+        self,
+        dataset: str,
+        model: str,
+        evaluator: PairwiseEvaluator,
+        target_model: str | None = None,
+        upload: bool = True,
+    ) -> DataFrame:
+        assert PairwiseEvaluator.extension_method == "pairwise", "You have to use a pairwise evaluator."
+        # generate match dataframe
+        df = self._generate_matches(dataset, model, target_model, shuffle=True)
+        # use evaluator to judge the preference
+        df = evaluator.evaluate(df)
+        if upload:
+            # add match dataframe
+            self.add_matches(df)
+
+        return df
 
     def get_matches(
         self,
@@ -476,9 +495,9 @@ class ModelArena(Base):
         target_models: str | list[str] | None = None,
     ) -> DataFrame:
         # get result dataframe
-        if analyst.analysis_method == "unary":
+        if analyst.extension_method == "unary":
             df = self.get_evaluations(datasets, models)
-        elif analyst.analysis_method == "pairwise":
+        elif analyst.extension_method == "pairwise":
             df = self.get_matches(datasets, models, target_models=target_models)
         else:
             raise ValueError("Unknown analyst method, it should be one of [unary/pairwise].")
